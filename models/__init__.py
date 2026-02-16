@@ -15,7 +15,9 @@ from .encoder import FrozenBERTEncoder
 from .fusion import (
     SimpleConcatFusion,
     CrossAttentionFusion,
-    create_fusion_module
+    GatedFusion,
+    AdaptiveFusion,
+    get_fusion_module
 )
 
 __all__ = [
@@ -29,5 +31,7 @@ __all__ = [
     'FrozenBERTEncoder',
     'SimpleConcatFusion',
     'CrossAttentionFusion',
-    'create_fusion_module',
+    'GatedFusion',
+    'AdaptiveFusion',
+    'get_fusion_module',
 ]

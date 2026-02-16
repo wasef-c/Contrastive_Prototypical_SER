@@ -69,6 +69,37 @@ class Config:
         """Load config from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+
+        # Ensure numeric types are correctly parsed
+        numeric_fields = [
+            'learning_rate', 'weight_decay', 'dropout', 'batch_size', 'num_epochs',
+            'contrastive_weight', 'contrastive_temperature', 'prototypical_alpha',
+            'prototypical_beta', 'prototypical_threshold', 'val_split',
+            'audio_dim', 'hidden_dim', 'num_classes', 'text_max_length',
+            'fusion_hidden_dim', 'num_attention_heads', 'vad_output_dim', 'seed'
+        ]
+
+        for field in numeric_fields:
+            if field in config_dict:
+                try:
+                    config_dict[field] = float(config_dict[field])
+                except (ValueError, TypeError):
+                    pass  # Keep original value if conversion fails
+
+        # Convert integer fields
+        int_fields = [
+            'batch_size', 'num_epochs', 'num_classes', 'text_max_length',
+            'audio_dim', 'hidden_dim', 'fusion_hidden_dim', 'num_attention_heads',
+            'vad_output_dim', 'seed'
+        ]
+
+        for field in int_fields:
+            if field in config_dict:
+                try:
+                    config_dict[field] = int(float(config_dict[field]))
+                except (ValueError, TypeError):
+                    pass
+
         return cls(**config_dict)
 
     def to_dict(self):

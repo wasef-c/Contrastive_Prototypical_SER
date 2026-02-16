@@ -12,23 +12,23 @@ from collections import defaultdict
 from data.dataset import EmotionDataset
 
 
-def calculate_dataset_centroids(dataset_name, data_root="/home/rml/Documents/pythontest/Emotion2VecTraining/Emotion2Vec_Text"):
+def calculate_dataset_centroids(dataset_name):
     """
     Calculate emotion centroids for a single dataset
 
     Args:
         dataset_name: "IEMO", "MSPI", or "MSPP"
-        data_root: Path to data directory
 
     Returns:
         dict: {emotion_label: [mean_valence, mean_arousal, mean_dominance]}
     """
     print(f"\nProcessing {dataset_name}...")
 
-    # Load dataset
+    # Load dataset from HuggingFace
     dataset = EmotionDataset(
         dataset_name=dataset_name,
-        data_root=data_root,
+        split="train",
+        config=None,
         task_type="classification"  # Just to load the data
     )
 
@@ -164,9 +164,6 @@ if __name__ == "__main__":
     # Datasets with VAD annotations
     datasets = ["IEMO", "MSPI", "MSPP"]
 
-    # Data root path
-    data_root = "/home/rml/Documents/pythontest/Emotion2VecTraining/Emotion2Vec_Text"
-
     print("=" * 60)
     print("Calculating Emotion Centroids from VAD Data")
     print("=" * 60)
@@ -175,7 +172,7 @@ if __name__ == "__main__":
     all_centroids = {}
     for dataset_name in datasets:
         try:
-            centroids = calculate_dataset_centroids(dataset_name, data_root)
+            centroids = calculate_dataset_centroids(dataset_name)
             all_centroids[dataset_name] = centroids
         except Exception as e:
             print(f"  ⚠️  Error processing {dataset_name}: {e}")

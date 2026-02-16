@@ -45,11 +45,12 @@ train_dataset: "MSPP"  # "IEMO", "MSPI", or "MSPP" (NOT "CMUMOSEI" or "SAMSEMO")
 test_datasets: ["IEMO", "MSPI"]  # Cross-corpus evaluation
 
 # Expected VAD values for prototypicality calculation (normalized 0-1)
+
 expected_vad:
-  0: [0.5, 0.375, 0.5]   # neutral
-  1: [0.75, 0.7, 0.7]    # happy
-  2: [0.2, 0.3, 0.25]    # sad
-  3: [0.2, 0.8, 0.75]    # anger
+  0: [0.4896, 0.5458, 0.5458]  # neutral
+  1: [0.7127, 0.5518, 0.5518]  # happy
+  2: [0.3060, 0.4895, 0.4895]  # sad
+  3: [0.2397, 0.6102, 0.6102]  # anger
 
 # WandB settings
 wandb_project: "Emotion2Vec_Contrastive"
