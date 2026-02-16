@@ -1,0 +1,56 @@
+# Prototypical Contrastive Learning V2 Configuration
+# Pair weighting: weight_ij = exp(-beta * (difficulty_i + difficulty_j))
+
+# Experiment name
+experiment_name: "Prototypical_V2_MSPP"
+
+# Task settings
+task_type: "classification"
+num_classes: 4
+
+# Model settings
+modality: "both"
+audio_dim: 768
+text_model_name: "bert-base-uncased"
+freeze_text_encoder: true
+text_max_length: 128
+hidden_dim: 1024
+dropout: 0.1
+
+# Fusion settings
+fusion_type: "cross_attention"
+fusion_hidden_dim: 1024
+num_attention_heads: 8
+
+# Training settings
+num_epochs: 30
+batch_size: 32
+learning_rate: 5e-5
+weight_decay: 1e-4
+val_split: 0.1
+
+# Contrastive learning (ENABLED)
+use_contrastive: true
+contrastive_loss_type: "prototypical_v2"  # Pair weighting
+contrastive_weight: 0.5
+contrastive_temperature: 0.07
+
+# Prototypicality settings
+prototypical_alpha: 1.0
+prototypical_beta: 0.5  # Weight decay for pair weighting
+prototypical_threshold: 1.0
+
+# Dataset settings
+train_dataset: "MSPP"
+test_datasets: ["IEMO", "MSPI"]
+
+# Expected VAD values (normalized 0-1)
+expected_vad:
+  0: [0.5, 0.375, 0.5]   # neutral
+  1: [0.75, 0.7, 0.7]    # happy
+  2: [0.2, 0.3, 0.25]    # sad
+  3: [0.2, 0.8, 0.75]    # anger
+
+# WandB settings
+wandb_project: "Emotion2Vec_Contrastive"
+seed: 42

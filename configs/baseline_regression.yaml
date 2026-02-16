@@ -1,0 +1,56 @@
+# Baseline VAD Regression Configuration
+# Simple cross-corpus VAD prediction without contrastive learning
+
+# Experiment name
+experiment_name: "Baseline_Regression_MSPP"
+
+# Task settings
+task_type: "regression"  # "classification" or "regression"
+vad_output_dim: 3  # Valence, Arousal, Dominance
+
+# Model settings
+modality: "both"  # "audio", "text", or "both"
+audio_dim: 768
+text_model_name: "bert-base-uncased"
+freeze_text_encoder: true
+text_max_length: 128
+hidden_dim: 1024
+dropout: 0.1
+
+# Fusion settings (only for modality="both")
+fusion_type: "cross_attention"  # "concat" or "cross_attention"
+fusion_hidden_dim: 1024
+num_attention_heads: 8
+
+# Training settings
+num_epochs: 60
+batch_size: 32
+learning_rate: 5e-6
+weight_decay: 5e-6
+val_split: 0.1
+
+# Contrastive learning (disabled for baseline)
+use_contrastive: false
+contrastive_loss_type: "supervised"
+contrastive_weight: 0.0
+contrastive_temperature: 0.07
+
+# Prototypicality settings (for future use)
+prototypical_alpha: 1.0
+prototypical_beta: 0.5
+prototypical_threshold: 1.0
+
+# Dataset settings - IMPORTANT: Only use datasets with VAD annotations
+train_dataset: "MSPP"  # "IEMO", "MSPI", or "MSPP" (NOT "CMUMOSEI" or "SAMSEMO")
+test_datasets: ["IEMO", "MSPI"]  # Cross-corpus evaluation
+
+# Expected VAD values for prototypicality calculation (normalized 0-1)
+expected_vad:
+  0: [0.5, 0.375, 0.5]   # neutral
+  1: [0.75, 0.7, 0.7]    # happy
+  2: [0.2, 0.3, 0.25]    # sad
+  3: [0.2, 0.8, 0.75]    # anger
+
+# WandB settings
+wandb_project: "Emotion2Vec_Contrastive"
+seed: 42
