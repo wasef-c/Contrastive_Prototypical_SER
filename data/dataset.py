@@ -26,7 +26,12 @@ class EmotionDataset(Dataset):
         "IEMO": "cairocode/IEMO_Audio_Text_Merged",
         "MSPI": "cairocode/MSPI_Audio_Text_Merged",
         "MSPP": "cairocode/MSPP_Audio_Text_Merged",
+        "CMUMOSEI": "cairocode/CMUMOSEI_Emotion2Vec_PrecomputedEncodings",
+        "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
     }
+
+    # Datasets that have VAD annotations (for regression and prototypicality)
+    DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
 
     def __init__(self, dataset_name, split="train", config=None, task_type="classification"):
         """
@@ -41,6 +46,12 @@ class EmotionDataset(Dataset):
         self.config = config
         self.task_type = task_type
         self.modality = getattr(config, 'modality', 'both') if config else 'both'
+
+        self.has_vad = dataset_name in self.DATASETS_WITH_VAD
+
+        # For regression, only datasets with VAD are valid
+        if task_type == "regression" and not self.has_vad:
+            raise ValueError(f"{dataset_name} has no VAD annotations - cannot use for regression")
 
         # Load dataset from HuggingFace
         if dataset_name not in self.DATASET_MAP:
@@ -200,6 +211,10 @@ def create_datasets(config):
     if not test_dataset_names:
         all_datasets = list(EmotionDataset.DATASET_MAP.keys())
         test_dataset_names = [d for d in all_datasets if d != config.train_dataset]
+
+    # For regression, filter out datasets without VAD
+    if task_type == "regression":
+        test_dataset_names = [d for d in test_dataset_names if d in EmotionDataset.DATASETS_WITH_VAD]
 
     test_datasets = []
     for dataset_name in test_dataset_names:

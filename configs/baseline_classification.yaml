@@ -42,7 +42,7 @@ prototypical_threshold: 1.0
 
 # Dataset settings
 train_dataset: "MSPP"  # "IEMO", "MSPI", or "MSPP"
-test_datasets: ["IEMO", "MSPI"]  # Cross-corpus evaluation
+test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]  # Cross-corpus evaluation
 
 # Expected VAD values for prototypicality calculation (normalized 0-1)
 

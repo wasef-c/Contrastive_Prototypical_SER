@@ -6,6 +6,7 @@ Clean training script for emotion recognition with contrastive learning
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 import random
@@ -303,7 +304,32 @@ def train(config):
     if config.task_type == "regression":
         criterion = nn.MSELoss()
     else:
-        criterion = nn.CrossEntropyLoss()
+        # Compute inverse-frequency class weights for imbalanced data
+        class_counts = [0, 0, 0, 0]
+        for item in train_dataset.data:
+            label = item["label"]
+            if label < 4:
+                class_counts[label] += 1
+
+        total_samples = sum(class_counts)
+        freq_weights = []
+        for i in range(config.num_classes):
+            if class_counts[i] > 0:
+                freq_ratio = class_counts[i] / total_samples
+                freq_weight = (1.0 / freq_ratio) / config.num_classes
+            else:
+                freq_weight = 1.0
+            freq_weights.append(freq_weight)
+
+        # Normalize so weights sum to num_classes
+        total_weight = sum(freq_weights)
+        freq_weights = [w / total_weight * config.num_classes for w in freq_weights]
+
+        print(f"   Class counts: {class_counts}")
+        print(f"   Class weights: {[f'{w:.3f}' for w in freq_weights]}")
+
+        freq_weights_tensor = torch.tensor(freq_weights, dtype=torch.float32).to(device)
+        criterion = nn.CrossEntropyLoss(weight=freq_weights_tensor)
 
     contrastive_criterion = None
     if config.use_contrastive:
@@ -322,6 +348,10 @@ def train(config):
         lr=config.learning_rate,
         weight_decay=config.weight_decay
     )
+
+    # Learning rate scheduler (CosineAnnealing like old repo)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
+    print(f"   Scheduler: CosineAnnealingLR (T_max={config.num_epochs})")
 
     # Initialize WandB
     wandb.init(
@@ -342,6 +372,11 @@ def train(config):
         train_metrics = train_epoch(
             model, train_loader, criterion, optimizer, device, config, contrastive_criterion
         )
+
+        # Step scheduler
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"   LR: {current_lr:.2e}")
 
         # Validate
         val_metrics = evaluate(model, val_loader, criterion, device, config)

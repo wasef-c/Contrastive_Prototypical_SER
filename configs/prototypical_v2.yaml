@@ -42,7 +42,7 @@ prototypical_threshold: 1.0
 
 # Dataset settings
 train_dataset: "MSPP"
-test_datasets: ["IEMO", "MSPI"]
+test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
 
 # Expected VAD values (normalized 0-1)
 
