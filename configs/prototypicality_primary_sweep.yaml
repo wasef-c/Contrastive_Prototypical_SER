@@ -1,0 +1,230 @@
+# Prototypicality-Weighted Primary Loss & Label Smoothing
+# Novel: modify the PRIMARY classification loss using prototypicality
+#   - Weighted CE: prototypical samples get higher weight (cleaner signal)
+#   - Label smoothing: atypical samples get softer labels (less overfitting to noise)
+# Works with single-corpus training (literature comparison) AND multi-corpus
+# Run with: python runner.py --config configs/prototypicality_primary_sweep.yaml --all
+
+template_config: &template
+  wandb_project: "prototypicality_primary_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Contrastive/adversarial off by default
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+
+  # Prototypical primary loss defaults (off unless overridden)
+  use_prototypical_weighting: false
+  prototypical_weighting_alpha: 2.0
+  use_prototypical_label_smoothing: false
+  label_smoothing_beta: 0.5
+  label_smoothing_max: 0.6
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # 1. Single-corpus baselines (no prototypicality)
+  # ============================================================
+  - <<: *template
+    name: "PP_MSPP_baseline"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "PP_IEMO_baseline"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # ============================================================
+  # 2. Weighted CE only — alpha sweep (single-corpus MSPP)
+  #    Higher alpha = stronger focus on prototypical samples
+  # ============================================================
+  - <<: *template
+    name: "PP_MSPP_wCE_a1.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 1.0
+
+  - <<: *template
+    name: "PP_MSPP_wCE_a2.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "PP_MSPP_wCE_a3.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+
+  - <<: *template
+    name: "PP_MSPP_wCE_a5.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 5.0
+
+  # ============================================================
+  # 3. Label smoothing only — beta sweep (single-corpus MSPP)
+  #    Higher beta = more smoothing for atypical samples
+  # ============================================================
+  - <<: *template
+    name: "PP_MSPP_LS_b0.3"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.3
+
+  - <<: *template
+    name: "PP_MSPP_LS_b0.5"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "PP_MSPP_LS_b1.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 1.0
+
+  # ============================================================
+  # 4. Both combined (single-corpus MSPP)
+  # ============================================================
+  - <<: *template
+    name: "PP_MSPP_both_a2.0_b0.5"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "PP_MSPP_both_a3.0_b0.5"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "PP_MSPP_both_a2.0_b1.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 1.0
+
+  # ============================================================
+  # 5. Single-corpus IEMO (best alpha/beta from MSPP)
+  # ============================================================
+  - <<: *template
+    name: "PP_IEMO_wCE_a2.0"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "PP_IEMO_LS_b0.5"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "PP_IEMO_both_a2.0_b0.5"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  # ============================================================
+  # 6. Multi-corpus (ALL3) — baseline + best variants
+  # ============================================================
+  - <<: *template
+    name: "PP_ALL3_baseline"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "PP_ALL3_wCE_a2.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "PP_ALL3_LS_b0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "PP_ALL3_both_a2.0_b0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  # ============================================================
+  # 7. Multi-corpus + domain adversarial + prototypical primary
+  # ============================================================
+  - <<: *template
+    name: "PP_ALL3_both_DA"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+    use_domain_adversarial: true
+    adversarial_weight: 0.3
+    adversarial_alpha: 2.0
+    adversarial_hidden_dim: 256
+    use_prototypical_adversarial: true

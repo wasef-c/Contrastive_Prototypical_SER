@@ -1,0 +1,200 @@
+# Multi-Corpus Training Sweep with Proper Ablation
+# Compares: No contrastive → SupCon (no prototypicality) → Prototype-anchored (novel)
+# This isolates the contribution of prototypicality weighting.
+# Run with: python runner.py --config configs/multi_corpus_sweep.yaml --all
+
+template_config: &template
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Projection head
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Defaults (overridden per experiment)
+  contrastive_loss_type: "supervised"
+  use_contrastive: false
+  prototypical_alpha: 2.0
+  prototypical_beta: 0.5
+  contrastive_temperature: 0.07
+  contrastive_weight: 2.0
+  margin_base: 0.1
+  separation_margin: 2.0
+  separation_weight: 0.5
+  alignment_weight: 1.0
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+  wandb_project: "Emotion2Vec_Contrastive"
+
+experiments:
+  # ============================================================
+  # 1. Single-corpus baselines (no contrastive)
+  # ============================================================
+  # - <<: *template
+  #   name: "MC_MSPP_baseline"
+  #   train_dataset: "MSPP"
+  #   test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # - <<: *template
+  #   name: "MC_IEMO_baseline"
+  #   train_dataset: "IEMO"
+  #   test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # - <<: *template
+  #   name: "MC_MSPI_baseline"
+  #   train_dataset: "MSPI"
+  #   test_datasets: ["MSPP", "IEMO", "CMUMOSEI", "SAMSEMO"]
+
+  # ============================================================
+  # 2. Multi-corpus baselines (no contrastive)
+  #    Isolates: does more training data alone help?
+  # ============================================================
+  - <<: *template
+    name: "MC_IEMO+MSPI_baseline"
+    train_dataset: ["IEMO", "MSPI"]
+    test_datasets: ["MSPP", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "MC_IEMO+MSPP_baseline"
+    train_dataset: ["IEMO", "MSPP"]
+    test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "MC_MSPI+MSPP_baseline"
+    train_dataset: ["MSPI", "MSPP"]
+    test_datasets: ["IEMO", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "MC_ALL3_baseline"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  # ============================================================
+  # 3. Multi-corpus + SupCon (contrastive WITHOUT prototypicality)
+  #    Isolates: does any contrastive signal help with multi-corpus?
+  # ============================================================
+  - <<: *template
+    name: "MC_IEMO+MSPI_SupCon"
+    train_dataset: ["IEMO", "MSPI"]
+    test_datasets: ["MSPP", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "MC_IEMO+MSPP_SupCon"
+    train_dataset: ["IEMO", "MSPP"]
+    test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "MC_MSPI+MSPP_SupCon"
+    train_dataset: ["MSPI", "MSPP"]
+    test_datasets: ["IEMO", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "MC_ALL3_SupCon"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+
+  # ============================================================
+  # 4. Multi-corpus + Prototype-Anchored MultiDS (NOVEL - with prototypicality)
+  #    The novel contribution: prototypicality-weighted cross-domain alignment
+  # ============================================================
+  - <<: *template
+    name: "MC_IEMO+MSPI_PA"
+    train_dataset: ["IEMO", "MSPI"]
+    test_datasets: ["MSPP", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 2.0
+
+  - <<: *template
+    name: "MC_IEMO+MSPP_PA"
+    train_dataset: ["IEMO", "MSPP"]
+    test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 2.0
+
+  - <<: *template
+    name: "MC_MSPI+MSPP_PA"
+    train_dataset: ["MSPI", "MSPP"]
+    test_datasets: ["IEMO", "CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 2.0
+
+  - <<: *template
+    name: "MC_ALL3_PA"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 2.0
+
+  # ============================================================
+  # 5. ALL3 contrastive weight sweep (SupCon vs PA at matched weights)
+  #    Fair comparison at different loss strengths
+  # ============================================================
+  - <<: *template
+    name: "MC_ALL3_SupCon_w2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 2.0
+
+  - <<: *template
+    name: "MC_ALL3_PA_w5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 5.0
+
+  - <<: *template
+    name: "MC_ALL3_SupCon_w5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 5.0

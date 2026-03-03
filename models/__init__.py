@@ -9,9 +9,19 @@ from .contrastive_loss import (
     PrototypicalContrastiveLoss_V1,
     PrototypicalContrastiveLoss_V2,
     PrototypicalContrastiveLoss_V3,
+    PrototypeAnchoredLoss,
+    PrototypeAnchoredMultiDSLoss,
+    PrototypeDivergenceLoss,
     create_contrastive_loss
 )
+from .domain_adversarial import (
+    GradientReversalLayer,
+    DomainDiscriminator,
+    PrototypicalDomainAdversarialLoss,
+)
+from .prototypicality_predictor import PrototypicalityPredictor
 from .encoder import FrozenBERTEncoder
+from .audio_encoder import Wav2Vec2Encoder
 from .fusion import (
     SimpleConcatFusion,
     CrossAttentionFusion,
@@ -27,8 +37,13 @@ __all__ = [
     'PrototypicalContrastiveLoss_V1',
     'PrototypicalContrastiveLoss_V2',
     'PrototypicalContrastiveLoss_V3',
+    'PrototypeAnchoredLoss',
+    'PrototypeAnchoredMultiDSLoss',
+    'PrototypeDivergenceLoss',
     'create_contrastive_loss',
+    'PrototypicalityPredictor',
     'FrozenBERTEncoder',
+    'Wav2Vec2Encoder',
     'SimpleConcatFusion',
     'CrossAttentionFusion',
     'GatedFusion',

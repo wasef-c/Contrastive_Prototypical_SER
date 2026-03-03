@@ -1,0 +1,394 @@
+# Text Model & Prototypicality Ablation
+# Compares: BERT vs RoBERTa vs DeBERTa-v3 with unfreeze levels + prototypicality methods
+# Run with: python runner.py --config configs/text_model_ablation.yaml --all
+
+template_config: &template
+  wandb_project: "text_model_ablation"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Defaults
+  text_model_name: "bert-base-uncased"
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Off by default
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+#   # ============================================================
+#   # 1. Text model comparison  ALL3, frozen vs unfreeze4
+#   # ============================================================
+#   # BERT (already have these from prior sweep, but included for completeness)
+#   - <<: *template
+#     name: "TM_ALL3_bert_frozen"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "bert-base-uncased"
+
+#   - <<: *template
+#     name: "TM_ALL3_bert_uf3"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "bert-base-uncased"
+#     unfreeze_bert_layers: 3
+
+#   - <<: *template
+#     name: "TM_ALL3_bert_uf4"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "bert-base-uncased"
+#     unfreeze_bert_layers: 4
+
+#   - <<: *template
+#     name: "TM_ALL3_bert_uf5"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "bert-base-uncased"
+#     unfreeze_bert_layers: 5
+
+#   # RoBERTa
+#   - <<: *template
+#     name: "TM_ALL3_roberta_frozen"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+
+#   - <<: *template
+#     name: "TM_ALL3_roberta_uf2"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+#     unfreeze_bert_layers: 2
+
+#   - <<: *template
+#     name: "TM_ALL3_roberta_uf3"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+#     unfreeze_bert_layers: 3
+
+#   - <<: *template
+#     name: "TM_ALL3_roberta_uf4"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+#     unfreeze_bert_layers: 4
+
+#   - <<: *template
+#     name: "TM_ALL3_roberta_uf5"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+#     unfreeze_bert_layers: 5
+
+#   - <<: *template
+#     name: "TM_ALL3_roberta_uf6"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "roberta-base"
+#     unfreeze_bert_layers: 6
+
+#   # DeBERTa-v3
+#   - <<: *template
+#     name: "TM_ALL3_deberta_frozen"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+
+#   - <<: *template
+#     name: "TM_ALL3_deberta_uf2"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+#     unfreeze_bert_layers: 2
+
+#   - <<: *template
+#     name: "TM_ALL3_deberta_uf3"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+#     unfreeze_bert_layers: 3
+
+#   - <<: *template
+#     name: "TM_ALL3_deberta_uf4"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+#     unfreeze_bert_layers: 4
+
+#   - <<: *template
+#     name: "TM_ALL3_deberta_uf5"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+#     unfreeze_bert_layers: 5
+
+#   - <<: *template
+#     name: "TM_ALL3_deberta_uf6"
+#     train_dataset: ["IEMO", "MSPI", "MSPP"]
+#     test_datasets: ["CMUMOSEI", "SAMSEMO"]
+#     text_model_name: "microsoft/deberta-v3-base"
+#     unfreeze_bert_layers: 6
+
+  # ============================================================
+  # 2. WCE alpha ablation ALL3 + unfreeze4, each text model
+  # ============================================================
+  # BERT
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_wCE_a1"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 1.0
+
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_wCE_a2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_wCE_a3"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_wCE_a5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 5.0
+
+  # RoBERTa
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_wCE_a1"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 1.0
+
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_wCE_a2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_wCE_a3"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_wCE_a5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 5.0
+
+  # DeBERTa
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_wCE_a1"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 1.0
+
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_wCE_a2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_wCE_a3"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_wCE_a5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 5.0
+
+  # ============================================================
+  # 3. Label smoothing on best model+unfreeze (all three models)
+  # ============================================================
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_LS_b0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_LS_b0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_LS_b0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  # ============================================================
+  # 4. Combined wCE + LS on each model (best alpha from section 2)
+  # ============================================================
+  - <<: *template
+    name: "TM_ALL3_bert_uf4_wCE_LS"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "bert-base-uncased"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "TM_ALL3_roberta_uf4_wCE_LS"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "TM_ALL3_deberta_uf4_wCE_LS"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  # ============================================================
+  # 5. Single-corpus MSPP best model with prototypicality
+  # ============================================================
+  - <<: *template
+    name: "TM_MSPP_roberta_frozen"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+
+  - <<: *template
+    name: "TM_MSPP_roberta_uf4"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+
+  - <<: *template
+    name: "TM_MSPP_roberta_uf4_wCE_a2"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "roberta-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "TM_MSPP_deberta_frozen"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+
+  - <<: *template
+    name: "TM_MSPP_deberta_uf4"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+
+  - <<: *template
+    name: "TM_MSPP_deberta_uf4_wCE_a2"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    text_model_name: "microsoft/deberta-v3-base"
+    unfreeze_bert_layers: 4
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0

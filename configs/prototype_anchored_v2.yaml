@@ -1,0 +1,174 @@
+# Prototype-Anchored Loss V2 - Refined sweep based on V1 findings
+# Key finding: higher contrastive weight = better transfer (w=2.0 was best, trend not plateaued)
+# Run with: python runner.py --config configs/prototype_anchored_v2.yaml --all
+
+template_config: &template
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Projection head
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Prototype-anchored defaults (best from V1)
+  contrastive_loss_type: "prototype_anchored"
+  use_contrastive: true
+  contrastive_temperature: 0.07
+  prototypical_alpha: 2.0
+  prototypical_beta: 0.5
+  margin_base: 0.1
+  separation_margin: 2.0
+  separation_weight: 0.5
+
+  # Dataset
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+  wandb_project: "Anchored_Contrastive_V2"
+
+experiments:
+  # ============================================================
+  # 0. Baseline
+  # ============================================================
+  - <<: *template
+    name: "PAv2_Baseline"
+    use_contrastive: false
+
+  # ============================================================
+  # 1. Higher contrastive weights (V1 showed w=2.0 best, push further)
+  # ============================================================
+  - <<: *template
+    name: "PAv2_w3.0"
+    contrastive_weight: 3.0
+
+  - <<: *template
+    name: "PAv2_w5.0"
+    contrastive_weight: 5.0
+
+  - <<: *template
+    name: "PAv2_w8.0"
+    contrastive_weight: 8.0
+
+  - <<: *template
+    name: "PAv2_w12.0"
+    contrastive_weight: 12.0
+
+  # ============================================================
+  # 2. High weight + alpha combos
+  #    Alpha controls prototypicality focus. Test with best weights.
+  # ============================================================
+  - <<: *template
+    name: "PAv2_w5_a1.0"
+    contrastive_weight: 5.0
+    prototypical_alpha: 1.0
+
+  - <<: *template
+    name: "PAv2_w5_a3.0"
+    contrastive_weight: 5.0
+    prototypical_alpha: 3.0
+
+  - <<: *template
+    name: "PAv2_w5_a5.0"
+    contrastive_weight: 5.0
+    prototypical_alpha: 5.0
+
+  # ============================================================
+  # 3. High weight + separation tuning
+  #    More separation might help push class prototypes further apart
+  # ============================================================
+  - <<: *template
+    name: "PAv2_w5_sep3.0"
+    contrastive_weight: 5.0
+    separation_margin: 3.0
+    separation_weight: 1.0
+
+  - <<: *template
+    name: "PAv2_w5_sep4.0"
+    contrastive_weight: 5.0
+    separation_margin: 4.0
+    separation_weight: 1.0
+
+  # ============================================================
+  # 4. High weight + tighter margins (force prototypical samples closer)
+  # ============================================================
+  - <<: *template
+    name: "PAv2_w5_mb0.01"
+    contrastive_weight: 5.0
+    margin_base: 0.01
+
+  - <<: *template
+    name: "PAv2_w5_mb0.05_b0.1"
+    contrastive_weight: 5.0
+    margin_base: 0.05
+    prototypical_beta: 0.1
+
+  # ============================================================
+  # 5. High weight + larger projection (more capacity for contrastive space)
+  # ============================================================
+  - <<: *template
+    name: "PAv2_w5_proj256"
+    contrastive_weight: 5.0
+    projection_dim: 256
+    projection_hidden_dim: 512
+
+  # ============================================================
+  # 6. Best combo candidates (combining top findings from V1)
+  #    w=2.0 was best, alpha=2.0 was solid, proj256 helped
+  # ============================================================
+  - <<: *template
+    name: "PAv2_best_v1"
+    contrastive_weight: 2.0
+    prototypical_alpha: 2.0
+    projection_dim: 256
+    projection_hidden_dim: 512
+
+  - <<: *template
+    name: "PAv2_best_v2"
+    contrastive_weight: 5.0
+    prototypical_alpha: 2.0
+    margin_base: 0.05
+    prototypical_beta: 0.1
+    separation_margin: 3.0
+    separation_weight: 1.0
+
+  - <<: *template
+    name: "PAv2_best_v3"
+    contrastive_weight: 5.0
+    prototypical_alpha: 1.0
+    margin_base: 0.01
+    prototypical_beta: 0.5
+    separation_margin: 3.0
+    separation_weight: 1.0
+    projection_dim: 256
+    projection_hidden_dim: 512

@@ -4,6 +4,7 @@ Simplified emotion dataset loader for cross-corpus experiments
 """
 
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 from datasets import load_dataset
 import math
@@ -16,12 +17,13 @@ class EmotionDataset(Dataset):
     Supports:
     - IEMO, MSPI, MSPP (with VAD annotations)
     - Pre-extracted audio features (Emotion2Vec 768-dim)
+    - Raw audio waveforms (for Wav2Vec2 encoder)
     - Text transcripts
     - VAD normalization to [0, 1] range
     - Prototypicality (difficulty) calculation
     """
 
-    # Dataset mappings
+    # Dataset mappings (preextracted Emotion2Vec features)
     DATASET_MAP = {
         "IEMO": "cairocode/IEMO_Audio_Text_Merged",
         "MSPI": "cairocode/MSPI_Audio_Text_Merged",
@@ -30,13 +32,20 @@ class EmotionDataset(Dataset):
         "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
     }
 
+    # Alternative HF paths for wav2vec2 mode (raw audio)
+    # CMUMOSEI/SAMSEMO need different paths that contain actual audio
+    AUDIO_DATASET_MAP = {
+        "CMUMOSEI": "cairocode/cmu_mosei_wav_2",
+        "SAMSEMO": "cairocode/samsemo-audio",
+    }
+
     # Datasets that have VAD annotations (for regression and prototypicality)
     DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
 
     def __init__(self, dataset_name, split="train", config=None, task_type="classification"):
         """
         Args:
-            dataset_name: str - "IEMO", "MSPI", or "MSPP"
+            dataset_name: str - "IEMO", "MSPI", "MSPP", "CMUMOSEI", or "SAMSEMO"
             split: str - "train" or "test"
             config: Config object with expected_vad and modality
             task_type: str - "classification" or "regression"
@@ -46,6 +55,7 @@ class EmotionDataset(Dataset):
         self.config = config
         self.task_type = task_type
         self.modality = getattr(config, 'modality', 'both') if config else 'both'
+        self.audio_encoder_type = getattr(config, 'audio_encoder_type', 'preextracted') if config else 'preextracted'
 
         self.has_vad = dataset_name in self.DATASETS_WITH_VAD
 
@@ -53,28 +63,55 @@ class EmotionDataset(Dataset):
         if task_type == "regression" and not self.has_vad:
             raise ValueError(f"{dataset_name} has no VAD annotations - cannot use for regression")
 
-        # Load dataset from HuggingFace
-        if dataset_name not in self.DATASET_MAP:
+        # Determine which HF dataset path to use
+        if self.audio_encoder_type == "wav2vec2" and dataset_name in self.AUDIO_DATASET_MAP:
+            dataset_path = self.AUDIO_DATASET_MAP[dataset_name]
+        elif dataset_name in self.DATASET_MAP:
+            dataset_path = self.DATASET_MAP[dataset_name]
+        else:
             raise ValueError(f"Unknown dataset: {dataset_name}. Must be one of {list(self.DATASET_MAP.keys())}")
 
-        dataset_path = self.DATASET_MAP[dataset_name]
+        # Load dataset from HuggingFace
         self.hf_dataset = load_dataset(dataset_path, split=split, trust_remote_code=True)
 
-        print(f"📥 Loaded {dataset_name}: {len(self.hf_dataset)} samples")
+        print(f"  Loaded {dataset_name}: {len(self.hf_dataset)} samples (encoder: {self.audio_encoder_type})")
         print(f"   Columns: {self.hf_dataset.column_names}")
 
         # Process data
         self.data = []
         skipped_vad_count = 0
+        skipped_label_count = 0
 
         for item in self.hf_dataset:
-            # Extract features (store raw, convert to tensor in __getitem__)
+            # Extract label
+            label = item["label"]
+
+            # Filter out invalid labels (CMUMOSEI/SAMSEMO have labels -1..6, keep only 0-3)
+            if label < 0 or label > 3:
+                skipped_label_count += 1
+                continue
+
+            # Extract audio based on encoder type
             if self.modality in ["audio", "both"]:
-                if "emotion2vec_features" not in item or item["emotion2vec_features"] is None:
-                    continue
-                features = item["emotion2vec_features"][0]["feats"]  # Raw list
+                if self.audio_encoder_type == "wav2vec2":
+                    # Load raw waveform from audio column
+                    audio_data = item.get("audio")
+                    if audio_data is None:
+                        continue
+                    waveform = np.array(audio_data["array"], dtype=np.float32)
+                    sampling_rate = audio_data["sampling_rate"]
+                    features = None
+                else:
+                    # Preextracted Emotion2Vec features
+                    if "emotion2vec_features" not in item or item["emotion2vec_features"] is None:
+                        continue
+                    features = item["emotion2vec_features"][0]["feats"]  # Raw list
+                    waveform = None
+                    sampling_rate = None
             else:
                 features = None
+                waveform = None
+                sampling_rate = None
 
             # Extract transcript
             if self.modality in ["text", "both"]:
@@ -83,9 +120,6 @@ class EmotionDataset(Dataset):
                     transcript = "[EMPTY]"
             else:
                 transcript = None
-
-            # Extract label
-            label = item["label"]
 
             # Extract VAD values with multiple naming variants
             valence = item.get("valence", item.get("consensus_valence", item.get("EmoVal", None)))
@@ -107,9 +141,9 @@ class EmotionDataset(Dataset):
             # Normalize VAD to [0, 1] range
             if valence is not None and not (isinstance(valence, float) and math.isnan(valence)):
                 if dataset_name == "MSPP":
-                    valence = (valence - 1) / 6  # 1-7 scale → 0-1
+                    valence = (valence - 1) / 6  # 1-7 scale -> 0-1
                 else:  # IEMO, MSPI use 1-5 scale
-                    valence = (valence - 1) / 4  # 1-5 scale → 0-1
+                    valence = (valence - 1) / 4  # 1-5 scale -> 0-1
 
             if arousal is not None and not (isinstance(arousal, float) and math.isnan(arousal)):
                 if dataset_name == "MSPP":
@@ -132,7 +166,7 @@ class EmotionDataset(Dataset):
                 dominance = 0.5
 
             # Store sample data
-            self.data.append({
+            sample = {
                 "features": features,  # Raw list (convert to tensor in __getitem__)
                 "transcript": transcript,
                 "label": label,
@@ -140,11 +174,20 @@ class EmotionDataset(Dataset):
                 "arousal": arousal,
                 "dominance": dominance,
                 "dataset": dataset_name,
-            })
+            }
 
-        print(f"✅ Loaded {len(self.data)} samples from {dataset_name}")
+            # Store waveform data for wav2vec2 mode
+            if waveform is not None:
+                sample["waveform"] = waveform
+                sample["sampling_rate"] = sampling_rate
+
+            self.data.append(sample)
+
+        print(f"  Loaded {len(self.data)} samples from {dataset_name}")
         if skipped_vad_count > 0:
-            print(f"   ⚠️  Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
+            print(f"   Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
+        if skipped_label_count > 0:
+            print(f"   Skipped {skipped_label_count} samples with label > 3")
 
     def __len__(self):
         return len(self.data)
@@ -156,7 +199,8 @@ class EmotionDataset(Dataset):
         Returns dict with:
             - label: int (0-3)
             - valence, arousal, dominance: float (0-1 normalized)
-            - features: tensor [audio_dim] - if audio/both modality
+            - features: tensor [audio_dim] - if preextracted audio
+            - waveform: tensor [num_samples] - if wav2vec2 mode
             - transcript: str - if text/both modality
             - dataset: str - dataset name
         """
@@ -170,12 +214,19 @@ class EmotionDataset(Dataset):
             "dataset": item["dataset"],
         }
 
-        # Add audio features (convert to tensor here)
-        if self.modality in ["audio", "both"] and item["features"] is not None:
+        # Add audio features (preextracted mode)
+        if self.modality in ["audio", "both"] and item.get("features") is not None:
             features = item["features"]
             if not isinstance(features, torch.Tensor):
                 features = torch.tensor(features, dtype=torch.float32)
             result["features"] = features
+
+        # Add waveform (wav2vec2 mode)
+        if self.modality in ["audio", "both"] and item.get("waveform") is not None:
+            waveform = item["waveform"]
+            if not isinstance(waveform, torch.Tensor):
+                waveform = torch.tensor(waveform, dtype=torch.float32)
+            result["waveform"] = waveform
 
         # Add text
         if self.modality in ["text", "both"]:
@@ -184,9 +235,71 @@ class EmotionDataset(Dataset):
         return result
 
 
+class MultiCorpusDataset(Dataset):
+    """
+    Combines multiple EmotionDatasets into one for multi-corpus training.
+    Each sample retains its source dataset name for tracking.
+    """
+
+    def __init__(self, datasets):
+        """
+        Args:
+            datasets: list of EmotionDataset instances
+        """
+        self.datasets = datasets
+        self.data = []
+        for ds in datasets:
+            self.data.extend(ds.data)
+
+        self.dataset_name = "+".join(ds.dataset_name for ds in datasets)
+        self.modality = datasets[0].modality
+        self.audio_encoder_type = datasets[0].audio_encoder_type
+
+        print(f"  Combined {len(datasets)} datasets: {self.dataset_name} ({len(self.data)} total samples)")
+        for ds in datasets:
+            print(f"   - {ds.dataset_name}: {len(ds.data)} samples")
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+
+        result = {
+            "label": torch.tensor(item["label"], dtype=torch.long),
+            "valence": item["valence"],
+            "arousal": item["arousal"],
+            "dominance": item["dominance"],
+            "dataset": item["dataset"],
+        }
+
+        if self.modality in ["audio", "both"] and item.get("features") is not None:
+            features = item["features"]
+            if not isinstance(features, torch.Tensor):
+                features = torch.tensor(features, dtype=torch.float32)
+            result["features"] = features
+
+        if self.modality in ["audio", "both"] and item.get("waveform") is not None:
+            waveform = item["waveform"]
+            if not isinstance(waveform, torch.Tensor):
+                waveform = torch.tensor(waveform, dtype=torch.float32)
+            result["waveform"] = waveform
+
+        if self.modality in ["text", "both"]:
+            result["transcript"] = item["transcript"]
+
+        return result
+
+
 def create_datasets(config):
     """
-    Create train and test datasets based on config
+    Create train and test datasets based on config.
+
+    Supports single or multi-corpus training:
+        train_dataset: "MSPP"                    # single corpus
+        train_dataset: ["IEMO", "MSPI", "MSPP"]  # multi-corpus
+
+    Test datasets automatically exclude any datasets used for training.
 
     Args:
         config: Config object with train_dataset, test_datasets, task_type
@@ -196,21 +309,38 @@ def create_datasets(config):
     """
     task_type = getattr(config, 'task_type', 'classification')
 
-    # Create training dataset
-    train_dataset = EmotionDataset(
-        config.train_dataset,
-        split="train",
-        config=config,
-        task_type=task_type
-    )
+    # Support single string or list of training datasets
+    train_names = config.train_dataset
+    if isinstance(train_names, str):
+        train_names = [train_names]
+
+    # Load each training dataset
+    train_dataset_list = []
+    for name in train_names:
+        ds = EmotionDataset(
+            name,
+            split="train",
+            config=config,
+            task_type=task_type
+        )
+        train_dataset_list.append(ds)
+
+    # Combine if multi-corpus, otherwise use single dataset
+    if len(train_dataset_list) == 1:
+        train_dataset = train_dataset_list[0]
+    else:
+        train_dataset = MultiCorpusDataset(train_dataset_list)
 
     # Create test datasets (cross-corpus evaluation)
     test_dataset_names = getattr(config, 'test_datasets', [])
 
-    # If not specified, use all datasets except training one
+    # If not specified, use all datasets except training ones
     if not test_dataset_names:
         all_datasets = list(EmotionDataset.DATASET_MAP.keys())
-        test_dataset_names = [d for d in all_datasets if d != config.train_dataset]
+        test_dataset_names = [d for d in all_datasets if d not in train_names]
+
+    # Exclude any training datasets from test
+    test_dataset_names = [d for d in test_dataset_names if d not in train_names]
 
     # For regression, filter out datasets without VAD
     if task_type == "regression":
@@ -226,6 +356,6 @@ def create_datasets(config):
         )
         test_datasets.append(test_dataset)
 
-    print(f"🚀 Training: {config.train_dataset} → {test_dataset_names}")
+    print(f"  Training: {train_dataset.dataset_name} -> {test_dataset_names}")
 
     return train_dataset, test_datasets

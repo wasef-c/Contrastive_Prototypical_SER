@@ -1,0 +1,210 @@
+# Contrastive Learning Sweep V2 - With projection head + larger batch sizes
+# Run with: python runner.py --config configs/contrastive_sweep_v2.yaml --all
+
+template_config: &template
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 30
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Projection head defaults
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Dataset
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # Expected VAD (normalized 0-1)
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+  wandb_project: "Emotion2Vec_Contrastive"
+
+experiments:
+  # ============================================================
+  # 0. Baseline (no contrastive) - batch_size 128 for fair comparison
+  # ============================================================
+  - <<: *template
+    name: "V2_Baseline_bs128"
+    use_contrastive: false
+
+  # ============================================================
+  # 1. Batch size comparison with SupCon
+  # ============================================================
+  - <<: *template
+    name: "V2_SupCon_bs64"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    batch_size: 64
+
+  - <<: *template
+    name: "V2_SupCon_bs128"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    batch_size: 128
+
+  - <<: *template
+    name: "V2_SupCon_bs256"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    batch_size: 256
+
+  # ============================================================
+  # 2. Projection head dimension sweep (at bs=128)
+  # ============================================================
+  - <<: *template
+    name: "V2_SupCon_proj64"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    projection_dim: 64
+    projection_hidden_dim: 256
+
+  - <<: *template
+    name: "V2_SupCon_proj256"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    projection_dim: 256
+    projection_hidden_dim: 512
+
+  # ============================================================
+  # 3. Contrastive weight sweep (at bs=128, proj=128)
+  # ============================================================
+  - <<: *template
+    name: "V2_SupCon_w0.1"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.1
+    contrastive_temperature: 0.07
+
+  - <<: *template
+    name: "V2_SupCon_w0.3"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.3
+    contrastive_temperature: 0.07
+
+  - <<: *template
+    name: "V2_SupCon_w1.0"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 1.0
+    contrastive_temperature: 0.07
+
+  # ============================================================
+  # 4. Temperature sweep (at bs=128)
+  # ============================================================
+  - <<: *template
+    name: "V2_SupCon_t0.05"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.05
+
+  - <<: *template
+    name: "V2_SupCon_t0.15"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.15
+
+  # ============================================================
+  # 5. Prototypical V1 - alpha sweep (with projection head + bs=128)
+  # ============================================================
+  - <<: *template
+    name: "V2_ProtoV1_a0.5"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 0.5
+
+  - <<: *template
+    name: "V2_ProtoV1_a1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 1.0
+
+  - <<: *template
+    name: "V2_ProtoV1_a3.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 3.0
+
+  # ============================================================
+  # 6. Prototypical V2 - beta sweep
+  # ============================================================
+  - <<: *template
+    name: "V2_ProtoV2_b0.5"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 0.5
+
+  - <<: *template
+    name: "V2_ProtoV2_b1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 1.0
+
+  # ============================================================
+  # 7. Prototypical V3 - threshold sweep
+  # ============================================================
+  - <<: *template
+    name: "V2_ProtoV3_th0.3"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 0.3
+
+  - <<: *template
+    name: "V2_ProtoV3_th0.6"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 0.6

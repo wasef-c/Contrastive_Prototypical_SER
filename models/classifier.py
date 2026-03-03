@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.encoder import FrozenBERTEncoder
+from models.audio_encoder import Wav2Vec2Encoder
 from models.fusion import get_fusion_module
 
 
@@ -19,6 +20,7 @@ class EmotionClassifier(nn.Module):
     - Audio-only, text-only, or multimodal (audio + text)
     - Classification (4 classes) or VAD regression (3 outputs)
     - Embedding extraction at [batch, 1024] for contrastive learning
+    - Preextracted audio features or raw waveforms via Wav2Vec2
     """
 
     def __init__(
@@ -33,7 +35,14 @@ class EmotionClassifier(nn.Module):
         fusion_hidden_dim=512,
         num_attention_heads=8,
         task_type="classification",  # "classification" or "regression"
-        vad_output_dim=3
+        vad_output_dim=3,
+        projection_dim=128,
+        projection_hidden_dim=512,
+        use_projection_head=True,
+        unfreeze_bert_layers=0,
+        audio_encoder_type="preextracted",  # "preextracted" or "wav2vec2"
+        audio_model_name="facebook/wav2vec2-base-960h",
+        unfreeze_audio_layers=0,
     ):
         super().__init__()
 
@@ -43,13 +52,28 @@ class EmotionClassifier(nn.Module):
         self.dropout_rate = dropout
         self.modality = modality
         self.task_type = task_type
+        self.audio_encoder_type = audio_encoder_type
 
         # Output dimension
         self.output_dim = vad_output_dim if task_type == "regression" else num_classes
 
+        # Wav2Vec2 audio encoder (replaces preextracted features)
+        if audio_encoder_type == "wav2vec2" and modality in ["audio", "both"]:
+            self.audio_encoder = Wav2Vec2Encoder(
+                model_name=audio_model_name,
+                unfreeze_layers=unfreeze_audio_layers,
+            )
+            # Override audio_dim with wav2vec2 output dim
+            self.audio_dim = self.audio_encoder.get_output_dim()
+        else:
+            self.audio_encoder = None
+
         # Text encoder
         if modality in ["text", "both"]:
-            self.text_encoder = FrozenBERTEncoder(model_name=text_model_name)
+            self.text_encoder = FrozenBERTEncoder(
+                model_name=text_model_name,
+                unfreeze_layers=unfreeze_bert_layers,
+            )
             self.text_dim = self.text_encoder.get_output_dim()
         else:
             self.text_encoder = None
@@ -65,8 +89,21 @@ class EmotionClassifier(nn.Module):
         else:
             raise ValueError(f"Unknown modality: {modality}")
 
+        # Projection head for contrastive learning (separate from classifier)
+        # Maps embeddings to a lower-dim space where contrastive loss operates
+        # Classification head still uses the raw embeddings
+        self.use_projection_head = use_projection_head
+        if use_projection_head:
+            self.projection_head = nn.Sequential(
+                nn.Linear(hidden_dim, projection_hidden_dim),
+                nn.BatchNorm1d(projection_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(projection_hidden_dim, projection_dim),
+            )
+            print(f"   Projection head: {hidden_dim} -> {projection_hidden_dim} -> {projection_dim}")
+
     def _build_audio_only(self):
-        """Audio-only: [batch, 768] → [batch, 1024] → [batch, output_dim]"""
+        """Audio-only: [batch, audio_dim] -> [batch, 1024] -> [batch, output_dim]"""
         # Embedding layer
         self.embedding_layer = nn.Sequential(
             nn.Linear(self.audio_dim, self.hidden_dim),
@@ -81,7 +118,7 @@ class EmotionClassifier(nn.Module):
         )
 
     def _build_text_only(self):
-        """Text-only: [batch, 768] → [batch, 1024] → [batch, output_dim]"""
+        """Text-only: [batch, 768] -> [batch, 1024] -> [batch, output_dim]"""
         # Embedding layer
         self.embedding_layer = nn.Sequential(
             nn.Linear(self.text_dim, self.hidden_dim),
@@ -96,7 +133,7 @@ class EmotionClassifier(nn.Module):
         )
 
     def _build_multimodal(self, fusion_type, fusion_hidden_dim, num_heads, dropout):
-        """Multimodal: fusion → [batch, fusion_hidden_dim] → [batch, 1024] → [batch, output_dim]"""
+        """Multimodal: fusion -> [batch, fusion_hidden_dim] -> [batch, 1024] -> [batch, output_dim]"""
         # Fusion module
         self.fusion_module = get_fusion_module(
             fusion_type=fusion_type,
@@ -120,7 +157,8 @@ class EmotionClassifier(nn.Module):
             nn.Linear(self.hidden_dim, self.output_dim)
         )
 
-    def forward(self, audio_features=None, text_input_ids=None, text_attention_mask=None, return_embeddings=False):
+    def forward(self, audio_features=None, text_input_ids=None, text_attention_mask=None,
+                audio_waveforms=None, audio_attention_mask=None, return_embeddings=False):
         """
         Forward pass with optional embedding extraction
 
@@ -128,12 +166,18 @@ class EmotionClassifier(nn.Module):
             audio_features: [batch_size, audio_dim] - preextracted audio features
             text_input_ids: [batch_size, seq_len] - text token IDs
             text_attention_mask: [batch_size, seq_len] - text attention mask
+            audio_waveforms: [batch_size, num_samples] - raw waveforms (wav2vec2 mode)
+            audio_attention_mask: [batch_size, num_samples] - waveform attention mask
             return_embeddings: bool - if True, return (logits, embeddings)
 
         Returns:
             logits: [batch_size, output_dim]
             embeddings: [batch_size, hidden_dim] - only if return_embeddings=True
         """
+        # If wav2vec2 mode, encode waveforms to get audio_features
+        if self.audio_encoder is not None and audio_waveforms is not None:
+            audio_features = self.audio_encoder(audio_waveforms, audio_attention_mask)
+
         if self.modality == "audio":
             return self._forward_audio(audio_features, return_embeddings)
         elif self.modality == "text":
@@ -141,19 +185,23 @@ class EmotionClassifier(nn.Module):
         elif self.modality == "both":
             return self._forward_multimodal(audio_features, text_input_ids, text_attention_mask, return_embeddings)
 
+    def _project(self, embeddings):
+        """Project embeddings through projection head for contrastive learning"""
+        if self.use_projection_head:
+            return self.projection_head(embeddings)
+        return embeddings
+
     def _forward_audio(self, audio_features, return_embeddings=False):
         """Audio-only forward pass"""
         if audio_features is None:
             raise ValueError("audio_features required for audio mode")
 
-        # Get embeddings
         embeddings = self.embedding_layer(audio_features)  # [batch, 1024]
-
-        # Get logits
         logits = self.output_layer(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
-            return logits, embeddings
+            projected = self._project(embeddings)
+            return logits, projected, embeddings
         return logits
 
     def _forward_text(self, text_input_ids, text_attention_mask, return_embeddings=False):
@@ -161,17 +209,13 @@ class EmotionClassifier(nn.Module):
         if text_input_ids is None or text_attention_mask is None:
             raise ValueError("text inputs required for text mode")
 
-        # Extract text features
         text_features = self.text_encoder(text_input_ids, text_attention_mask)  # [batch, 768]
-
-        # Get embeddings
         embeddings = self.embedding_layer(text_features)  # [batch, 1024]
-
-        # Get logits
         logits = self.output_layer(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
-            return logits, embeddings
+            projected = self._project(embeddings)
+            return logits, projected, embeddings
         return logits
 
     def _forward_multimodal(self, audio_features, text_input_ids, text_attention_mask, return_embeddings=False):
@@ -181,20 +225,14 @@ class EmotionClassifier(nn.Module):
         if text_input_ids is None or text_attention_mask is None:
             raise ValueError("text inputs required for multimodal mode")
 
-        # Extract text features
         text_features = self.text_encoder(text_input_ids, text_attention_mask)  # [batch, 768]
-
-        # Fuse modalities
         fused_features = self.fusion_module(audio_features, text_features)  # [batch, fusion_hidden_dim]
-
-        # Get embeddings
         embeddings = self.embedding_layer(fused_features)  # [batch, 1024]
-
-        # Get logits
         logits = self.output_layer(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
-            return logits, embeddings
+            projected = self._project(embeddings)
+            return logits, projected, embeddings
         return logits
 
 
@@ -225,5 +263,12 @@ def create_model(config):
         fusion_hidden_dim=cfg.get('fusion_hidden_dim', 512),
         num_attention_heads=cfg.get('num_attention_heads', 8),
         task_type=cfg.get('task_type', 'classification'),
-        vad_output_dim=cfg.get('vad_output_dim', 3)
+        vad_output_dim=cfg.get('vad_output_dim', 3),
+        projection_dim=cfg.get('projection_dim', 128),
+        projection_hidden_dim=cfg.get('projection_hidden_dim', 512),
+        use_projection_head=cfg.get('use_contrastive', False),
+        unfreeze_bert_layers=cfg.get('unfreeze_bert_layers', 0),
+        audio_encoder_type=cfg.get('audio_encoder_type', 'preextracted'),
+        audio_model_name=cfg.get('audio_model_name', 'facebook/wav2vec2-base-960h'),
+        unfreeze_audio_layers=cfg.get('unfreeze_audio_layers', 0),
     )

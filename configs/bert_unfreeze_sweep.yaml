@@ -1,0 +1,186 @@
+# BERT Unfreezing Sweep
+# Unfreeze top 2-4 BERT layers with differential LR
+# Tests: frozen vs unfrozen, with/without prototypicality methods
+# Run with: python runner.py --config configs/bert_unfreeze_sweep.yaml --all
+
+template_config: &template
+  wandb_project: "bert_unfreeze_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # BERT defaults (frozen)
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Off by default
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # 1. ALL3 baselines (frozen BERT — for comparison)
+  # ============================================================
+  - <<: *template
+    name: "BU_ALL3_frozen"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  # ============================================================
+  # 2. ALL3 BERT unfreeze — layer sweep
+  # ============================================================
+  - <<: *template
+    name: "BU_ALL3_unfreeze2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-7
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze6"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 6
+    bert_learning_rate: 5e-7
+
+  # ============================================================
+  # 3. BERT LR sweep (with 4 unfrozen layers)
+  # ============================================================
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_lr1e-7"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 1e-7
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_lr1e-6"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 1e-6
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_lr2e-6"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 2e-6
+
+  # ============================================================
+  # 4. Single-corpus with BERT unfreeze (MSPP, IEMO)
+  # ============================================================
+  - <<: *template
+    name: "BU_MSPP_frozen"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "BU_MSPP_unfreeze4"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+
+  - <<: *template
+    name: "BU_IEMO_frozen"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "BU_IEMO_unfreeze4"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+
+  # ============================================================
+  # 5. Best BERT unfreeze + prototypicality methods (ALL3)
+  #    Stack BERT unfreezing with our prototypicality approaches
+  # ============================================================
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_protoPred"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_wCE"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_DA"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_domain_adversarial: true
+    adversarial_weight: 0.3
+    adversarial_alpha: 2.0
+    adversarial_hidden_dim: 256
+    use_prototypical_adversarial: true
+
+  - <<: *template
+    name: "BU_ALL3_unfreeze4_full"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_domain_adversarial: true
+    adversarial_weight: 0.3
+    adversarial_alpha: 2.0
+    adversarial_hidden_dim: 256
+    use_prototypical_adversarial: true

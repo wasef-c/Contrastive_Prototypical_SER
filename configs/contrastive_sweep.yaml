@@ -1,0 +1,227 @@
+# Contrastive Learning Hyperparameter Sweep
+# Run with: python runner.py --config configs/contrastive_sweep.yaml --all
+
+template_config: &template
+  # Seeds for statistical significance
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model (fixed across experiments)
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training (fixed across experiments)
+  num_epochs: 30
+  batch_size: 32
+  learning_rate: 5e-5
+  weight_decay: 1e-4
+  val_split: 0.1
+
+  # Dataset
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # Expected VAD (normalized 0-1)
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]  # neutral
+    1: [0.7127, 0.5518, 0.5518]  # happy
+    2: [0.3060, 0.4895, 0.4895]  # sad
+    3: [0.2397, 0.6102, 0.6102]  # anger
+
+  wandb_project: "Emotion2Vec_Contrastive_V2"
+
+experiments:
+  # ============================================================
+  # 0. Baseline (no contrastive)
+  # ============================================================
+  - <<: *template
+    name: "Baseline_NoContrastive"
+    use_contrastive: false
+
+  # ============================================================
+  # 1. Standard SupCon (no prototypicality weighting)
+  # ============================================================
+  - <<: *template
+    name: "SupCon_w0.3_t0.07"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.3
+    contrastive_temperature: 0.07
+
+  - <<: *template
+    name: "SupCon_w0.5_t0.07"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+
+  - <<: *template
+    name: "SupCon_w1.0_t0.07"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 1.0
+    contrastive_temperature: 0.07
+
+  # ============================================================
+  # 2. SupCon - Temperature sweep (at best weight from above)
+  # ============================================================
+  - <<: *template
+    name: "SupCon_w0.5_t0.05"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.05
+
+  - <<: *template
+    name: "SupCon_w0.5_t0.1"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.1
+
+  - <<: *template
+    name: "SupCon_w0.5_t0.2"
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.2
+
+  # ============================================================
+  # 3. Prototypical V1 (sample weighting) - alpha sweep
+  #    weight_i = exp(-alpha * difficulty_i)
+  # ============================================================
+  - <<: *template
+    name: "ProtoV1_w0.5_a0.5"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 0.5
+
+  - <<: *template
+    name: "ProtoV1_w0.5_a1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 1.0
+
+  - <<: *template
+    name: "ProtoV1_w0.5_a2.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 2.0
+
+  - <<: *template
+    name: "ProtoV1_w0.5_a5.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_alpha: 5.0
+
+  # ============================================================
+  # 4. Prototypical V1 - contrastive weight sweep (at best alpha)
+  # ============================================================
+  - <<: *template
+    name: "ProtoV1_w0.1_a1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 0.1
+    contrastive_temperature: 0.07
+    prototypical_alpha: 1.0
+
+  - <<: *template
+    name: "ProtoV1_w1.0_a1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v1"
+    contrastive_weight: 1.0
+    contrastive_temperature: 0.07
+    prototypical_alpha: 1.0
+
+  # ============================================================
+  # 5. Prototypical V2 (pair weighting) - beta sweep
+  #    weight_ij = exp(-beta * (diff_i + diff_j))
+  # ============================================================
+  - <<: *template
+    name: "ProtoV2_w0.5_b0.25"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 0.25
+
+  - <<: *template
+    name: "ProtoV2_w0.5_b0.5"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 0.5
+
+  - <<: *template
+    name: "ProtoV2_w0.5_b1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 1.0
+
+  - <<: *template
+    name: "ProtoV2_w0.5_b2.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v2"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_beta: 2.0
+
+  # ============================================================
+  # 6. Prototypical V3 (threshold) - threshold sweep
+  #    weight_i = 1.0 if diff < threshold else 0.1
+  # ============================================================
+  - <<: *template
+    name: "ProtoV3_w0.5_th0.3"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 0.3
+
+  - <<: *template
+    name: "ProtoV3_w0.5_th0.5"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 0.5
+
+  - <<: *template
+    name: "ProtoV3_w0.5_th0.8"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 0.8
+
+  - <<: *template
+    name: "ProtoV3_w0.5_th1.0"
+    use_contrastive: true
+    contrastive_loss_type: "prototypical_v3"
+    contrastive_weight: 0.5
+    contrastive_temperature: 0.07
+    prototypical_threshold: 1.0

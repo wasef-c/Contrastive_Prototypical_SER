@@ -1,0 +1,249 @@
+# Wav2Vec2 Audio Encoder + Two-Stage Prototypicality Training Sweep
+# Tests: preextracted vs wav2vec2, unfreezing layers, two-stage training
+# Run with: python runner.py --config configs/wav2vec2_sweep.yaml --all
+
+template_config: &template
+  wandb_project: "wav2vec2_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Audio encoder defaults (preextracted)
+  audio_encoder_type: "preextracted"
+  audio_model_name: "facebook/wav2vec2-base-960h"
+  unfreeze_audio_layers: 0
+  audio_learning_rate: 5e-7
+
+  # BERT defaults (frozen)
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Two-stage defaults (off)
+  use_two_stage_training: false
+  stage1_percentile: 50
+  stage1_epochs: 30
+  stage2_lr_factor: 0.5
+
+  # Off by default
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # 1. BASELINES — preextracted (Emotion2Vec) vs wav2vec2 frozen
+  # ============================================================
+  # - <<: *template
+  #   name: "W2V_ALL3_preextracted_baseline"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   audio_encoder_type: "preextracted"
+
+  # - <<: *template
+  #   name: "W2V_ALL3_wav2vec2_frozen"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   audio_encoder_type: "wav2vec2"
+  #   unfreeze_audio_layers: 0
+  #   batch_size: 16
+
+  # ============================================================
+  # 2. WAV2VEC2 UNFREEZE — layer sweep (0, 2, 4)
+  # ============================================================
+  - <<: *template
+    name: "W2V_ALL3_wav2vec2_unfreeze2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_ALL3_wav2vec2_unfreeze4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: 5e-7
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_ALL3_wav2vec2_unfreezeAll"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 12
+    audio_learning_rate: 5e-7
+    batch_size: 16
+
+  # ============================================================
+  # 3. WAV2VEC2 + BERT UNFREEZE combined
+  # ============================================================
+  - <<: *template
+    name: "W2V_ALL3_wav2vec2_uf2_bert_uf4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_ALL3_wav2vec2_uf4_bert_uf4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    batch_size: 16
+
+  # ============================================================
+  # 4. TWO-STAGE TRAINING — percentile 50% and 70%
+  # ============================================================
+  # - <<: *template
+  #   name: "W2V_ALL3_twostage_p50"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   use_two_stage_training: true
+  #   stage1_percentile: 50
+  #   stage1_epochs: 30
+  #   stage2_lr_factor: 0.1
+
+  - <<: *template
+    name: "W2V_ALL3_twostage_p70"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+
+  # ============================================================
+  # 5. TWO-STAGE + WAV2VEC2 UNFREEZE + BERT UNFREEZE + wCE
+  #    (full stack)
+  # ============================================================
+  - <<: *template
+    name: "W2V_ALL3_fullstack_twostage_p50"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 50
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_ALL3_fullstack_twostage_p70"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 16
+
+  # ============================================================
+  # 6. SINGLE-CORPUS (MSPP) variants
+  # ============================================================
+  - <<: *template
+    name: "W2V_MSPP_preextracted_baseline"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "preextracted"
+
+  - <<: *template
+    name: "W2V_MSPP_wav2vec2_frozen"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 0
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_MSPP_wav2vec2_uf2_bert_uf4"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    batch_size: 16
+
+  - <<: *template
+    name: "W2V_MSPP_twostage_p50"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_two_stage_training: true
+    stage1_percentile: 50
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+
+  - <<: *template
+    name: "W2V_MSPP_fullstack"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    audio_encoder_type: "wav2vec2"
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 50
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 16

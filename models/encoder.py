@@ -10,30 +10,60 @@ import warnings
 
 
 class FrozenBERTEncoder(nn.Module):
-    """Frozen BERT encoder for extracting text features"""
+    """BERT encoder with optional partial unfreezing of top layers"""
 
-    def __init__(self, model_name="bert-base-uncased", output_dim=768):
+    def __init__(self, model_name="bert-base-uncased", output_dim=768, unfreeze_layers=0):
         super().__init__()
 
         self.model_name = model_name
         self.output_dim = output_dim
+        self.unfreeze_layers = unfreeze_layers
 
         # Load pretrained BERT model and tokenizer
         print(f"📚 Loading BERT model: {model_name}")
         self.bert = AutoModel.from_pretrained(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        # Freeze all BERT parameters
+        # Auto-detect output dim from model config
+        self.output_dim = self.bert.config.hidden_size
+
+        # Find the encoder layers (works for BERT, RoBERTa, DeBERTa, etc.)
+        if hasattr(self.bert, 'encoder') and hasattr(self.bert.encoder, 'layer'):
+            self.encoder_layers = self.bert.encoder.layer
+        elif hasattr(self.bert, 'encoder') and hasattr(self.bert.encoder, 'layers'):
+            self.encoder_layers = self.bert.encoder.layers
+        else:
+            raise ValueError(f"Cannot find encoder layers for model: {model_name}")
+
+        # Freeze all parameters first
         for param in self.bert.parameters():
             param.requires_grad = False
 
-        self.bert.eval()  # Set to eval mode permanently
+        # Unfreeze top N layers if requested
+        if unfreeze_layers > 0:
+            total_layers = len(self.encoder_layers)
+            unfreeze_from = total_layers - unfreeze_layers
+            for i in range(unfreeze_from, total_layers):
+                for param in self.encoder_layers[i].parameters():
+                    param.requires_grad = True
+            # Also unfreeze pooler if it exists
+            if hasattr(self.bert, 'pooler') and self.bert.pooler is not None:
+                for param in self.bert.pooler.parameters():
+                    param.requires_grad = True
+            trainable = sum(p.numel() for p in self.bert.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.bert.parameters())
+            print(f"🔓 {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")
+        else:
+            self.bert.eval()  # Set to eval mode permanently when fully frozen
+            print(f"✅ {model_name} loaded and frozen (output_dim={self.output_dim})")
 
-        print(f"✅ BERT encoder loaded and frozen (output_dim={output_dim})")
+    def get_bert_params(self):
+        """Return only the unfrozen BERT parameters (for differential LR)"""
+        return [p for p in self.bert.parameters() if p.requires_grad]
 
     def forward(self, input_ids, attention_mask):
         """
-        Extract features from text using frozen BERT
+        Extract features from text using BERT
 
         Args:
             input_ids: Token IDs [batch_size, seq_len]
@@ -42,18 +72,24 @@ class FrozenBERTEncoder(nn.Module):
         Returns:
             features: [batch_size, output_dim] CLS token representation
         """
-        # Ensure BERT stays in eval mode
-        self.bert.eval()
-
-        with torch.no_grad():
+        if self.unfreeze_layers == 0:
+            # Fully frozen — no grad, eval mode
+            self.bert.eval()
+            with torch.no_grad():
+                outputs = self.bert(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    return_dict=True
+                )
+                cls_features = outputs.last_hidden_state[:, 0, :]
+        else:
+            # Partially unfrozen — need gradients
             outputs = self.bert(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True
             )
-
-            # Use [CLS] token representation (first token)
-            cls_features = outputs.last_hidden_state[:, 0, :]  # [batch_size, hidden_dim]
+            cls_features = outputs.last_hidden_state[:, 0, :]
 
         return cls_features
 

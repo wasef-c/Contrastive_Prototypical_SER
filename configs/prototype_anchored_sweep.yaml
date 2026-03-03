@@ -1,0 +1,180 @@
+# Prototype-Anchored Loss Sweep - Novel prototypicality-guided approach
+# Run with: python runner.py --config configs/prototype_anchored_sweep.yaml --all
+
+template_config: &template
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Projection head
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Prototype-anchored defaults
+  contrastive_loss_type: "prototype_anchored"
+  use_contrastive: true
+  contrastive_temperature: 0.07
+  margin_base: 0.1
+  separation_margin: 2.0
+  separation_weight: 0.5
+
+  # Dataset
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+  wandb_project: "Anchored_Contrastive"
+
+experiments:
+  # ============================================================
+  # 0. Baseline for comparison
+  # ============================================================
+  - <<: *template
+    name: "PA_Baseline"
+    use_contrastive: false
+
+  # ============================================================
+  # 1. Alpha sweep (prototypicality weight decay)
+  #    Higher alpha = more focus on prototypical samples
+  # ============================================================
+  - <<: *template
+    name: "PA_a1.0_w0.5"
+    prototypical_alpha: 1.0
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "PA_a2.0_w0.5"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "PA_a5.0_w0.5"
+    prototypical_alpha: 5.0
+    contrastive_weight: 0.5
+
+  # ============================================================
+  # 2. Contrastive weight sweep
+  # ============================================================
+  - <<: *template
+    name: "PA_a2.0_w0.1"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.1
+
+  - <<: *template
+    name: "PA_a2.0_w0.3"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.3
+
+  - <<: *template
+    name: "PA_a2.0_w1.0"
+    prototypical_alpha: 2.0
+    contrastive_weight: 1.0
+
+  - <<: *template
+    name: "PA_a2.0_w2.0"
+    prototypical_alpha: 2.0
+    contrastive_weight: 2.0
+
+  # ============================================================
+  # 3. Margin base sweep (minimum distance for prototypical samples)
+  # ============================================================
+  - <<: *template
+    name: "PA_mb0.01"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    margin_base: 0.01
+
+  - <<: *template
+    name: "PA_mb0.05"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    margin_base: 0.05
+
+  - <<: *template
+    name: "PA_mb0.3"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    margin_base: 0.3
+
+  # ============================================================
+  # 4. Beta sweep (margin scaling with difficulty)
+  #    Higher beta = more slack for atypical samples
+  # ============================================================
+  - <<: *template
+    name: "PA_b0.1"
+    prototypical_alpha: 2.0
+    prototypical_beta: 0.1
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "PA_b1.0"
+    prototypical_alpha: 2.0
+    prototypical_beta: 1.0
+    contrastive_weight: 0.5
+
+  - <<: *template
+    name: "PA_b2.0"
+    prototypical_alpha: 2.0
+    prototypical_beta: 2.0
+    contrastive_weight: 0.5
+
+  # ============================================================
+  # 5. Separation margin sweep (min dist between prototypes)
+  # ============================================================
+  - <<: *template
+    name: "PA_sep1.0"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    separation_margin: 1.0
+
+  - <<: *template
+    name: "PA_sep3.0"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    separation_margin: 3.0
+
+  # ============================================================
+  # 6. Projection dim sweep
+  # ============================================================
+  - <<: *template
+    name: "PA_proj64"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    projection_dim: 64
+    projection_hidden_dim: 256
+
+  - <<: *template
+    name: "PA_proj256"
+    prototypical_alpha: 2.0
+    contrastive_weight: 0.5
+    projection_dim: 256
+    projection_hidden_dim: 512

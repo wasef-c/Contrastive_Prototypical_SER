@@ -1,0 +1,183 @@
+# Domain Adversarial Training with Prototypicality Weighting
+# Novel: adversarial signal weighted by prototypicality
+#   - Prototypical samples MUST be domain-invariant (high adversarial weight)
+#   - Atypical samples are allowed to retain domain info (low adversarial weight)
+# Run with: python runner.py --config configs/domain_adversarial_sweep.yaml --all
+
+template_config: &template
+  wandb_project: "domain_adversarial_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Projection head (for contrastive, if used)
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Contrastive defaults (off unless overridden)
+  use_contrastive: false
+  contrastive_weight: 0.0
+
+  # Domain adversarial defaults
+  use_domain_adversarial: true
+  adversarial_weight: 0.1
+  adversarial_alpha: 2.0
+  adversarial_hidden_dim: 256
+  use_prototypical_adversarial: true
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+
+experiments:
+  # ============================================================
+  # 1. Multi-corpus baselines (no adversarial, no contrastive)
+  # ============================================================
+  # - <<: *template
+  #   name: "DA_ALL3_baseline"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   use_domain_adversarial: false
+
+  # - <<: *template
+  #   name: "DA_IEMO+MSPP_baseline"
+  #   train_dataset: ["IEMO", "MSPP"]
+  #   test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+  #   use_domain_adversarial: false
+
+  # ============================================================
+  # 2. Standard adversarial (NO prototypicality weighting)
+  #    Baseline for adversarial — all samples treated equally
+  # ============================================================
+  - <<: *template
+    name: "DA_ALL3_std_w0.1"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_adversarial: false
+    adversarial_weight: 0.1
+
+  - <<: *template
+    name: "DA_ALL3_std_w0.3"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_adversarial: false
+    adversarial_weight: 0.3
+
+  - <<: *template
+    name: "DA_ALL3_std_w0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_prototypical_adversarial: false
+    adversarial_weight: 0.5
+
+  # ============================================================
+  # 3. Prototypicality-weighted adversarial (NOVEL)
+  #    Our contribution: prototypical samples forced domain-invariant
+  # ============================================================
+  - <<: *template
+    name: "DA_ALL3_proto_w0.1"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.1
+
+  - <<: *template
+    name: "DA_ALL3_proto_w0.3"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.3
+
+  - <<: *template
+    name: "DA_ALL3_proto_w0.5"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.5
+
+  - <<: *template
+    name: "DA_ALL3_proto_w1.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 1.0
+
+  # ============================================================
+  # 4. Alpha sweep (prototypicality weight decay)
+  #    Higher alpha = stronger focus on prototypical samples
+  # ============================================================
+  - <<: *template
+    name: "DA_ALL3_a1.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.3
+    adversarial_alpha: 1.0
+
+  - <<: *template
+    name: "DA_ALL3_a5.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.3
+    adversarial_alpha: 5.0
+
+  # # ============================================================
+  # # 5. IEMO+MSPP combos (tests on MSPI too)
+  # # ============================================================
+  # - <<: *template
+  #   name: "DA_IEMO+MSPP_std_w0.3"
+  #   train_dataset: ["IEMO", "MSPP"]
+  #   test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+  #   use_prototypical_adversarial: false
+  #   adversarial_weight: 0.3
+
+  # - <<: *template
+  #   name: "DA_IEMO+MSPP_proto_w0.3"
+  #   train_dataset: ["IEMO", "MSPP"]
+  #   test_datasets: ["MSPI", "CMUMOSEI", "SAMSEMO"]
+  #   adversarial_weight: 0.3
+
+  # ============================================================
+  # 6. Combined: adversarial + prototype-anchored contrastive
+  #    Both domain invariance AND prototypicality-guided structure
+  # ============================================================
+  - <<: *template
+    name: "DA_ALL3_combined_PA"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.3
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored_multiDS"
+    contrastive_weight: 2.0
+
+  - <<: *template
+    name: "DA_ALL3_combined_SupCon"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    adversarial_weight: 0.3
+    use_contrastive: true
+    contrastive_loss_type: "supervised"
+    contrastive_weight: 0.5

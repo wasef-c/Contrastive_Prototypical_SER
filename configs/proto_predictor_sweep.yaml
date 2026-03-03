@@ -1,0 +1,205 @@
+# Auxiliary Prototypicality Prediction
+# Novel: multi-task learning where the backbone must predict WHERE a sample
+#   sits relative to its class prototype (VAD-based difficulty score)
+# This forces the shared embedding to encode annotation subjectivity structure
+# Run with: python runner.py --config configs/proto_predictor_sweep.yaml --all
+
+template_config: &template
+  wandb_project: "proto_predictor_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  freeze_text_encoder: true
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 64
+  batch_size: 128
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 10
+
+  # Contrastive/adversarial off
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+
+  # Prototypical primary loss off (test independently first)
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+
+  # Proto predictor defaults
+  use_proto_predictor: false
+  proto_predictor_weight: 0.5
+  proto_predictor_hidden_dim: 256
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # 1. Single-corpus baselines
+  # ============================================================
+  - <<: *template
+    name: "AUX_MSPP_baseline"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "AUX_IEMO_baseline"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # ============================================================
+  # 2. Proto predictor — lambda sweep (single-corpus MSPP)
+  # ============================================================
+  - <<: *template
+    name: "AUX_MSPP_pp_w0.1"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 0.1
+
+  - <<: *template
+    name: "AUX_MSPP_pp_w0.5"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 0.5
+
+  - <<: *template
+    name: "AUX_MSPP_pp_w1.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+
+  - <<: *template
+    name: "AUX_MSPP_pp_w2.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 2.0
+
+  - <<: *template
+    name: "AUX_MSPP_pp_w5.0"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 5.0
+
+  # ============================================================
+  # 3. Proto predictor on IEMO (best lambda from MSPP)
+  # ============================================================
+  - <<: *template
+    name: "AUX_IEMO_pp_w0.5"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 0.5
+
+  - <<: *template
+    name: "AUX_IEMO_pp_w1.0"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+
+  - <<: *template
+    name: "AUX_IEMO_pp_w2.0"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 2.0
+
+  # ============================================================
+  # 4. Proto predictor + weighted CE combined (MSPP)
+  # ============================================================
+  - <<: *template
+    name: "AUX_MSPP_pp_wCE"
+    train_dataset: "MSPP"
+
+    
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "AUX_MSPP_pp_LS"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  - <<: *template
+    name: "AUX_MSPP_pp_wCE_LS"
+    train_dataset: "MSPP"
+    test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+
+  # ============================================================
+  # 5. Multi-corpus (ALL3)
+  # ============================================================
+  - <<: *template
+    name: "AUX_ALL3_baseline"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  - <<: *template
+    name: "AUX_ALL3_pp_w1.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+
+  - <<: *template
+    name: "AUX_ALL3_pp_w2.0"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 2.0
+
+  # ============================================================
+  # 6. Kitchen sink: proto predictor + weighted CE + adversarial (ALL3)
+  # ============================================================
+  - <<: *template
+    name: "AUX_ALL3_full"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_predictor_weight: 1.0
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    use_domain_adversarial: true
+    adversarial_weight: 0.3
+    adversarial_alpha: 2.0
+    adversarial_hidden_dim: 256
+    use_prototypical_adversarial: true
