@@ -1,0 +1,167 @@
+# Emotion2Vec Finetuning Sweep
+# Emotion2Vec is pretrained specifically on emotional speech (unlike wav2vec2).
+# Tests: frozen baseline, unfreeze 2/4 blocks, + BERT unfreeze, two-stage, full stack.
+# Run with: python runner.py --config configs/emotion2vec_sweep.yaml --all
+#
+# VRAM budget: 24 GB
+# All experiments use batch_size: 1 with fp16 AMP (same as wav2vec2 sweep).
+# max_audio_seconds: 30 - slightly tighter than wav2vec2 to stay safe.
+
+template_config: &template
+  wandb_project: "emotion2vec_finetune_sweep"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "emotion2vec_base.pt"
+  emotion2vec_upstream_dir: "/home/rml/Documents/pythontest/emotion2vec/upstream"
+  unfreeze_audio_layers: 0
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT defaults (frozen)
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training - conservative batch size for raw audio + 24GB VRAM
+  num_epochs: 64
+  batch_size: 1
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Two-stage defaults (off)
+  use_two_stage_training: false
+  stage1_percentile: 50
+  stage1_epochs: 30
+  stage2_lr_factor: 0.5
+
+  # Off by default
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # 1. BASELINE - emotion2vec fully frozen
+  #    Establishes the ceiling from pretrained features alone.
+  # ============================================================
+  - <<: *template
+    name: "E2V_ALL3_frozen_baseline"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 0
+
+  # ============================================================
+  # 2. EMOTION2VEC UNFREEZE - top 2 and top 4 blocks
+  #    ~14M and ~28M extra trainable params respectively.
+  #    Keeps batch_size: 1 and AMP enabled.
+  # ============================================================
+  - <<: *template
+    name: "E2V_ALL3_unfreeze2"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    batch_size: 1
+
+  - <<: *template
+    name: "E2V_ALL3_unfreeze4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 4
+    audio_learning_rate: 5e-7
+    batch_size: 1
+
+  # ============================================================
+  # 3. EMOTION2VEC + BERT UNFREEZE combined
+  #    Two-tower finetuning: audio top-2 blocks + BERT top-4 layers.
+  #    Most VRAM-intensive single-stage config - keep batch_size: 1.
+  # ============================================================
+  - <<: *template
+    name: "E2V_ALL3_uf2_bert_uf4"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    batch_size: 1
+
+  # ============================================================
+  # 4. TWO-STAGE TRAINING (frozen encoder, p70 prototypical subset)
+  #    Stage 1: bottom 70% most prototypical samples only.
+  #    Stage 2: full data at 10x lower LR.
+  # ============================================================
+  - <<: *template
+    name: "E2V_ALL3_twostage_p70"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+
+  # ============================================================
+  # 5. FULL STACK: unfreeze + BERT + two-stage + prototypical weighting
+  #    p50 and p70 variants.
+  # ============================================================
+  - <<: *template
+    name: "E2V_ALL3_fullstack_p50"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 50
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 1
+
+  - <<: *template
+    name: "E2V_ALL3_fullstack_p70"
+    train_dataset: ["IEMO", "MSPI", "MSPP"]
+    test_datasets: ["CMUMOSEI", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    audio_learning_rate: 5e-7
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 1

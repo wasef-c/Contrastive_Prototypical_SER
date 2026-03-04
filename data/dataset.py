@@ -77,12 +77,15 @@ class EmotionDataset(Dataset):
         print(f"  Loaded {dataset_name}: {len(self.hf_dataset)} samples (encoder: {self.audio_encoder_type})")
         print(f"   Columns: {self.hf_dataset.column_names}")
 
-        # Process data
+        # Process data - store only lightweight metadata during init.
+        # Raw waveforms are loaded lazily in __getitem__ to avoid loading
+        # gigabytes of audio into RAM upfront.
         self.data = []
+        self.uses_raw_audio = self.audio_encoder_type in ("wav2vec2", "emotion2vec")
         skipped_vad_count = 0
         skipped_label_count = 0
 
-        for item in self.hf_dataset:
+        for hf_idx, item in enumerate(self.hf_dataset):
             # Extract label
             label = item["label"]
 
@@ -91,32 +94,15 @@ class EmotionDataset(Dataset):
                 skipped_label_count += 1
                 continue
 
-            # Extract audio based on encoder type
+            # For raw audio: only validate the column exists, do NOT load audio yet
             if self.modality in ["audio", "both"]:
-                if self.audio_encoder_type in ("wav2vec2", "emotion2vec"):
-                    # Load raw waveform from audio column
-                    audio_data = item.get("audio")
-                    if audio_data is None:
+                if self.uses_raw_audio:
+                    if item.get("audio") is None:
                         continue
-                    waveform = np.array(audio_data["array"], dtype=np.float32)
-                    sampling_rate = audio_data["sampling_rate"]
-                    # Truncate to max_audio_seconds to cap VRAM usage
-                    max_seconds = getattr(config, 'max_audio_seconds', 40)
-                    max_samples = int(max_seconds * sampling_rate)
-                    if len(waveform) > max_samples:
-                        waveform = waveform[:max_samples]
-                    features = None
                 else:
-                    # Preextracted Emotion2Vec features
+                    # Preextracted: load features eagerly (768 floats, negligible size)
                     if "emotion2vec_features" not in item or item["emotion2vec_features"] is None:
                         continue
-                    features = item["emotion2vec_features"][0]["feats"]  # Raw list
-                    waveform = None
-                    sampling_rate = None
-            else:
-                features = None
-                waveform = None
-                sampling_rate = None
 
             # Extract transcript
             if self.modality in ["text", "both"]:
@@ -170,9 +156,8 @@ class EmotionDataset(Dataset):
             if dominance is None:
                 dominance = 0.5
 
-            # Store sample data
+            # Store lightweight metadata only
             sample = {
-                "features": features,  # Raw list (convert to tensor in __getitem__)
                 "transcript": transcript,
                 "label": label,
                 "valence": valence,
@@ -181,10 +166,12 @@ class EmotionDataset(Dataset):
                 "dataset": dataset_name,
             }
 
-            # Store waveform data for wav2vec2 mode
-            if waveform is not None:
-                sample["waveform"] = waveform
-                sample["sampling_rate"] = sampling_rate
+            if self.uses_raw_audio:
+                # Store HF index for lazy waveform loading in __getitem__
+                sample["hf_idx"] = hf_idx
+            else:
+                # Preextracted features are small (768 floats), safe to load now
+                sample["features"] = item["emotion2vec_features"][0]["feats"]
 
             self.data.append(sample)
 
@@ -226,12 +213,15 @@ class EmotionDataset(Dataset):
                 features = torch.tensor(features, dtype=torch.float32)
             result["features"] = features
 
-        # Add waveform (wav2vec2 mode)
-        if self.modality in ["audio", "both"] and item.get("waveform") is not None:
-            waveform = item["waveform"]
-            if not isinstance(waveform, torch.Tensor):
-                waveform = torch.tensor(waveform, dtype=torch.float32)
-            result["waveform"] = waveform
+        # Add waveform (raw audio mode - lazy load from HF dataset on demand)
+        if self.modality in ["audio", "both"] and self.uses_raw_audio:
+            hf_item = self.hf_dataset[item["hf_idx"]]
+            audio = hf_item["audio"]
+            waveform = np.array(audio["array"], dtype=np.float32)
+            max_samples = int(getattr(self.config, 'max_audio_seconds', 40) * audio["sampling_rate"])
+            if len(waveform) > max_samples:
+                waveform = waveform[:max_samples]
+            result["waveform"] = torch.tensor(waveform, dtype=torch.float32)
 
         # Add text
         if self.modality in ["text", "both"]:
@@ -253,8 +243,10 @@ class MultiCorpusDataset(Dataset):
         """
         self.datasets = datasets
         self.data = []
+        self._cumulative = [0]  # cumulative sample counts for __getitem__ routing
         for ds in datasets:
             self.data.extend(ds.data)
+            self._cumulative.append(self._cumulative[-1] + len(ds.data))
 
         self.dataset_name = "+".join(ds.dataset_name for ds in datasets)
         self.modality = datasets[0].modality
@@ -268,32 +260,11 @@ class MultiCorpusDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
-
-        result = {
-            "label": torch.tensor(item["label"], dtype=torch.long),
-            "valence": item["valence"],
-            "arousal": item["arousal"],
-            "dominance": item["dominance"],
-            "dataset": item["dataset"],
-        }
-
-        if self.modality in ["audio", "both"] and item.get("features") is not None:
-            features = item["features"]
-            if not isinstance(features, torch.Tensor):
-                features = torch.tensor(features, dtype=torch.float32)
-            result["features"] = features
-
-        if self.modality in ["audio", "both"] and item.get("waveform") is not None:
-            waveform = item["waveform"]
-            if not isinstance(waveform, torch.Tensor):
-                waveform = torch.tensor(waveform, dtype=torch.float32)
-            result["waveform"] = waveform
-
-        if self.modality in ["text", "both"]:
-            result["transcript"] = item["transcript"]
-
-        return result
+        # Route to the parent EmotionDataset so lazy waveform loading works correctly
+        import bisect
+        ds_idx = bisect.bisect_right(self._cumulative, idx) - 1
+        local_idx = idx - self._cumulative[ds_idx]
+        return self.datasets[ds_idx][local_idx]
 
 
 def create_datasets(config):
