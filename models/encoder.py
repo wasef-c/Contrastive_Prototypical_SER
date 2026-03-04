@@ -50,9 +50,12 @@ class FrozenBERTEncoder(nn.Module):
             if hasattr(self.bert, 'pooler') and self.bert.pooler is not None:
                 for param in self.bert.pooler.parameters():
                     param.requires_grad = True
+            # Enable gradient checkpointing to save activation memory
+            self.bert.gradient_checkpointing_enable()
             trainable = sum(p.numel() for p in self.bert.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.bert.parameters())
             print(f"🔓 {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")
+            print(f"  Gradient checkpointing enabled")
         else:
             self.bert.eval()  # Set to eval mode permanently when fully frozen
             print(f"✅ {model_name} loaded and frozen (output_dim={self.output_dim})")

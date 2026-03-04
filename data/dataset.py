@@ -64,7 +64,7 @@ class EmotionDataset(Dataset):
             raise ValueError(f"{dataset_name} has no VAD annotations - cannot use for regression")
 
         # Determine which HF dataset path to use
-        if self.audio_encoder_type == "wav2vec2" and dataset_name in self.AUDIO_DATASET_MAP:
+        if self.audio_encoder_type in ("wav2vec2", "emotion2vec") and dataset_name in self.AUDIO_DATASET_MAP:
             dataset_path = self.AUDIO_DATASET_MAP[dataset_name]
         elif dataset_name in self.DATASET_MAP:
             dataset_path = self.DATASET_MAP[dataset_name]
@@ -93,13 +93,18 @@ class EmotionDataset(Dataset):
 
             # Extract audio based on encoder type
             if self.modality in ["audio", "both"]:
-                if self.audio_encoder_type == "wav2vec2":
+                if self.audio_encoder_type in ("wav2vec2", "emotion2vec"):
                     # Load raw waveform from audio column
                     audio_data = item.get("audio")
                     if audio_data is None:
                         continue
                     waveform = np.array(audio_data["array"], dtype=np.float32)
                     sampling_rate = audio_data["sampling_rate"]
+                    # Truncate to max_audio_seconds to cap VRAM usage
+                    max_seconds = getattr(config, 'max_audio_seconds', 40)
+                    max_samples = int(max_seconds * sampling_rate)
+                    if len(waveform) > max_samples:
+                        waveform = waveform[:max_samples]
                     features = None
                 else:
                     # Preextracted Emotion2Vec features

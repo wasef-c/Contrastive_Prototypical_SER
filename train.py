@@ -68,8 +68,10 @@ def _prepare_model_inputs(batch, config, model, device):
     """
     audio_encoder_type = getattr(config, 'audio_encoder_type', 'preextracted')
 
+    uses_raw_audio = audio_encoder_type in ("wav2vec2", "emotion2vec")
+
     if config.modality == "audio":
-        if audio_encoder_type == "wav2vec2":
+        if uses_raw_audio:
             waveforms = batch['waveforms'].to(device)
             audio_mask = batch['audio_attention_mask'].to(device)
             return {'audio_waveforms': waveforms, 'audio_attention_mask': audio_mask}
@@ -89,7 +91,7 @@ def _prepare_model_inputs(batch, config, model, device):
         transcripts = batch['transcript']
         model_inputs = {}
 
-        if audio_encoder_type == "wav2vec2":
+        if uses_raw_audio:
             model_inputs['audio_waveforms'] = batch['waveforms'].to(device)
             model_inputs['audio_attention_mask'] = batch['audio_attention_mask'].to(device)
         else:
@@ -612,12 +614,12 @@ def train(config, datasets=None):
         param_groups.append({'params': bert_params, 'lr': bert_lr})
         print(f"   BERT LR: {bert_lr:.2e}")
 
-    # Wav2Vec2 differential LR
-    if audio_encoder_type == "wav2vec2" and unfreeze_audio > 0 and hasattr(model, 'audio_encoder') and model.audio_encoder is not None:
+    # Wav2Vec2 / Emotion2Vec differential LR
+    if audio_encoder_type in ("wav2vec2", "emotion2vec") and unfreeze_audio > 0 and hasattr(model, 'audio_encoder') and model.audio_encoder is not None:
         audio_params = model.audio_encoder.get_audio_params()
         special_param_ids.update(id(p) for p in audio_params)
         param_groups.append({'params': audio_params, 'lr': audio_lr})
-        print(f"   Wav2Vec2 LR: {audio_lr:.2e}")
+        print(f"   {audio_encoder_type} LR: {audio_lr:.2e}")
 
     # All other model params
     other_model_params = [p for p in model.parameters() if id(p) not in special_param_ids]
@@ -642,7 +644,7 @@ def train(config, datasets=None):
     print(f"   Scheduler: CosineAnnealingLR (T_max={config.num_epochs})")
 
     # Mixed precision scaler (enabled for CUDA with wav2vec2 or when explicitly requested)
-    use_amp = device.type == 'cuda' and audio_encoder_type == 'wav2vec2'
+    use_amp = device.type == 'cuda' and audio_encoder_type in ('wav2vec2', 'emotion2vec')
     scaler = GradScaler('cuda') if use_amp else None
     if use_amp:
         print(f"   Mixed precision (fp16): enabled")

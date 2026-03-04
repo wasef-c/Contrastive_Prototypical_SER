@@ -29,10 +29,12 @@ class Config:
         self.bert_learning_rate = 5e-7  # 10x lower than main LR
 
         # Audio encoder
-        self.audio_encoder_type = "preextracted"  # "preextracted" or "wav2vec2"
+        self.audio_encoder_type = "preextracted"  # "preextracted", "wav2vec2", or "emotion2vec"
         self.audio_model_name = "facebook/wav2vec2-base-960h"
         self.unfreeze_audio_layers = 0  # 0 = fully frozen, 2-4 = unfreeze top N layers
-        self.audio_learning_rate = 5e-7  # differential LR for wav2vec2
+        self.audio_learning_rate = 5e-7  # differential LR for wav2vec2/emotion2vec
+        self.max_audio_seconds = 40  # truncate waveforms to this length (caps VRAM usage)
+        self.emotion2vec_upstream_dir = "/home/rml/Documents/pythontest/emotion2vec/upstream"
 
         # Fusion (for multimodal)
         self.fusion_type = "cross_attention"
@@ -131,6 +133,7 @@ class Config:
             'unfreeze_bert_layers', 'bert_learning_rate',
             'unfreeze_audio_layers', 'audio_learning_rate',
             'stage1_percentile', 'stage1_epochs', 'stage2_lr_factor',
+            'max_audio_seconds',
         ]
 
         for field in numeric_fields:

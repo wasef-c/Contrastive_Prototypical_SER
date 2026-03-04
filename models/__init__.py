@@ -21,7 +21,7 @@ from .domain_adversarial import (
 )
 from .prototypicality_predictor import PrototypicalityPredictor
 from .encoder import FrozenBERTEncoder
-from .audio_encoder import Wav2Vec2Encoder
+from .audio_encoder import Wav2Vec2Encoder, Emotion2VecEncoder
 from .fusion import (
     SimpleConcatFusion,
     CrossAttentionFusion,
@@ -44,6 +44,7 @@ __all__ = [
     'PrototypicalityPredictor',
     'FrozenBERTEncoder',
     'Wav2Vec2Encoder',
+    'Emotion2VecEncoder',
     'SimpleConcatFusion',
     'CrossAttentionFusion',
     'GatedFusion',

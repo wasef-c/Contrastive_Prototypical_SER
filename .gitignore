@@ -2,3 +2,4 @@ saved_models/
 wandb/
 CLAUDE.md 
 __pycache__/
+*.pt

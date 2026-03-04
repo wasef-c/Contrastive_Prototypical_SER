@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.encoder import FrozenBERTEncoder
-from models.audio_encoder import Wav2Vec2Encoder
+from models.audio_encoder import Wav2Vec2Encoder, Emotion2VecEncoder
 from models.fusion import get_fusion_module
 
 
@@ -40,9 +40,10 @@ class EmotionClassifier(nn.Module):
         projection_hidden_dim=512,
         use_projection_head=True,
         unfreeze_bert_layers=0,
-        audio_encoder_type="preextracted",  # "preextracted" or "wav2vec2"
+        audio_encoder_type="preextracted",  # "preextracted", "wav2vec2", or "emotion2vec"
         audio_model_name="facebook/wav2vec2-base-960h",
         unfreeze_audio_layers=0,
+        emotion2vec_upstream_dir="/home/rml/Documents/pythontest/emotion2vec/upstream",
     ):
         super().__init__()
 
@@ -57,13 +58,19 @@ class EmotionClassifier(nn.Module):
         # Output dimension
         self.output_dim = vad_output_dim if task_type == "regression" else num_classes
 
-        # Wav2Vec2 audio encoder (replaces preextracted features)
+        # Audio encoder (replaces preextracted features)
         if audio_encoder_type == "wav2vec2" and modality in ["audio", "both"]:
             self.audio_encoder = Wav2Vec2Encoder(
                 model_name=audio_model_name,
                 unfreeze_layers=unfreeze_audio_layers,
             )
-            # Override audio_dim with wav2vec2 output dim
+            self.audio_dim = self.audio_encoder.get_output_dim()
+        elif audio_encoder_type == "emotion2vec" and modality in ["audio", "both"]:
+            self.audio_encoder = Emotion2VecEncoder(
+                checkpoint_path=audio_model_name,
+                upstream_dir=emotion2vec_upstream_dir,
+                unfreeze_layers=unfreeze_audio_layers,
+            )
             self.audio_dim = self.audio_encoder.get_output_dim()
         else:
             self.audio_encoder = None
@@ -271,4 +278,8 @@ def create_model(config):
         audio_encoder_type=cfg.get('audio_encoder_type', 'preextracted'),
         audio_model_name=cfg.get('audio_model_name', 'facebook/wav2vec2-base-960h'),
         unfreeze_audio_layers=cfg.get('unfreeze_audio_layers', 0),
+        emotion2vec_upstream_dir=cfg.get(
+            'emotion2vec_upstream_dir',
+            '/home/rml/Documents/pythontest/emotion2vec/upstream'
+        ),
     )
