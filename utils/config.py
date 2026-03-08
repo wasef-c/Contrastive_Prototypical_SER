@@ -48,6 +48,7 @@ class Config:
         # Training
         self.num_epochs = 60
         self.batch_size = 32
+        self.gradient_accumulation_steps = 1  # set >1 with small batch_size to simulate larger effective batch
         self.learning_rate = 5e-6
         self.weight_decay = 5e-6
         self.dropout = 0.1
@@ -133,7 +134,7 @@ class Config:
             'unfreeze_bert_layers', 'bert_learning_rate',
             'unfreeze_audio_layers', 'audio_learning_rate',
             'stage1_percentile', 'stage1_epochs', 'stage2_lr_factor',
-            'max_audio_seconds',
+            'max_audio_seconds', 'gradient_accumulation_steps',
         ]
 
         for field in numeric_fields:
@@ -150,7 +151,7 @@ class Config:
             'early_stopping_patience', 'adversarial_hidden_dim',
             'proto_predictor_hidden_dim',
             'unfreeze_bert_layers',
-            'unfreeze_audio_layers', 'stage1_epochs',
+            'unfreeze_audio_layers', 'stage1_epochs', 'gradient_accumulation_steps',
         ]
 
         for field in int_fields:

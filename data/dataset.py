@@ -4,6 +4,7 @@ Simplified emotion dataset loader for cross-corpus experiments
 """
 
 import torch
+import torchaudio
 import numpy as np
 from torch.utils.data import Dataset
 from datasets import load_dataset
@@ -32,12 +33,16 @@ class EmotionDataset(Dataset):
         "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
     }
 
-    # Alternative HF paths for wav2vec2 mode (raw audio)
-    # CMUMOSEI/SAMSEMO need different paths that contain actual audio
+    # Alternative HF paths for raw audio (wav2vec2/emotion2vec online encoder)
+    # Used when the main DATASET_MAP entry lacks an 'audio' column
     AUDIO_DATASET_MAP = {
+        "MSPP": "cairocode/MSPP_WAV",
         "CMUMOSEI": "cairocode/cmu_mosei_wav_2",
         "SAMSEMO": "cairocode/samsemo-audio",
     }
+
+    # String emotion class → integer label (for datasets like MSPP_WAV without 'label' column)
+    EMOCLASS_TO_LABEL = {"N": 0, "H": 1, "S": 2, "A": 3}
 
     # Datasets that have VAD annotations (for regression and prototypicality)
     DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
@@ -86,8 +91,14 @@ class EmotionDataset(Dataset):
         skipped_label_count = 0
 
         for hf_idx, item in enumerate(self.hf_dataset):
-            # Extract label
-            label = item["label"]
+            # Extract label (numeric 'label' column, or string 'EmoClass' fallback)
+            if "label" in item:
+                label = item["label"]
+            elif "EmoClass" in item:
+                label = self.EMOCLASS_TO_LABEL.get(item["EmoClass"], -1)
+            else:
+                skipped_label_count += 1
+                continue
 
             # Filter out invalid labels (CMUMOSEI/SAMSEMO have labels -1..6, keep only 0-3)
             if label < 0 or label > 3:
@@ -217,11 +228,16 @@ class EmotionDataset(Dataset):
         if self.modality in ["audio", "both"] and self.uses_raw_audio:
             hf_item = self.hf_dataset[item["hf_idx"]]
             audio = hf_item["audio"]
-            waveform = np.array(audio["array"], dtype=np.float32)
-            max_samples = int(getattr(self.config, 'max_audio_seconds', 40) * audio["sampling_rate"])
-            if len(waveform) > max_samples:
+            waveform = torch.tensor(audio["array"], dtype=torch.float32)
+            src_sr = audio["sampling_rate"]
+            # Resample to 16kHz (matches preprocessing used for precomputed features)
+            if src_sr != 16000:
+                waveform = torchaudio.functional.resample(waveform, orig_freq=src_sr, new_freq=16000)
+            # Truncate to max length (encoder handles per-clip processing, no padding needed)
+            max_samples = int(getattr(self.config, 'max_audio_seconds', 40) * 16000)
+            if waveform.shape[0] > max_samples:
                 waveform = waveform[:max_samples]
-            result["waveform"] = torch.tensor(waveform, dtype=torch.float32)
+            result["waveform"] = waveform
 
         # Add text
         if self.modality in ["text", "both"]:

@@ -4,11 +4,11 @@
 # Run with: python runner.py --config configs/emotion2vec_sweep.yaml --all
 #
 # VRAM budget: 24 GB
-# All experiments use batch_size: 1 with fp16 AMP (same as wav2vec2 sweep).
+# All experiments use batch_size: 2 with fp16 AMP (same as wav2vec2 sweep).
 # max_audio_seconds: 30 - slightly tighter than wav2vec2 to stay safe.
 
 template_config: &template
-  wandb_project: "emotion2vec_finetune_sweep"
+  wandb_project: "emotion2vec_finetune_sweep_V2_LOLLL"
   seeds: [42]
 
   # Task
@@ -25,8 +25,7 @@ template_config: &template
 
   # Emotion2Vec encoder
   audio_encoder_type: "emotion2vec"
-  audio_model_name: "emotion2vec_base.pt"
-  emotion2vec_upstream_dir: "/home/rml/Documents/pythontest/emotion2vec/upstream"
+  audio_model_name: "iic/emotion2vec_base"
   unfreeze_audio_layers: 0
   audio_learning_rate: 5e-7
   max_audio_seconds: 30
@@ -40,9 +39,11 @@ template_config: &template
   fusion_hidden_dim: 1024
   num_attention_heads: 8
 
-  # Training - conservative batch size for raw audio + 24GB VRAM
-  num_epochs: 64
-  batch_size: 1
+  # Training - batch_size: 2 + accumulation: 4 = effective batch of 4, ~4x less VRAM per step
+  # batch_size: 1 + accumulation: 128 = effective batch 128, matches preextracted baseline dynamics
+  num_epochs: 50
+  batch_size: 8
+  gradient_accumulation_steps: 32
   learning_rate: 5e-6
   weight_decay: 1e-4
   val_split: 0.1
@@ -75,15 +76,18 @@ experiments:
   #    Establishes the ceiling from pretrained features alone.
   # ============================================================
   - <<: *template
-    name: "E2V_ALL3_frozen_baseline"
+    name: "PAR_E2V_ALL3_frozen_baseline"
     train_dataset: ["IEMO", "MSPI", "MSPP"]
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     unfreeze_audio_layers: 0
+    # audio_encoder_type: "preextracted"
+
 
   # ============================================================
   # 2. EMOTION2VEC UNFREEZE - top 2 and top 4 blocks
   #    ~14M and ~28M extra trainable params respectively.
-  #    Keeps batch_size: 1 and AMP enabled.
+  #    AMP + gradient checkpointing enabled automatically when unfreeze_audio_layers > 0.
+  #    Start with batch_size: 16 (conservative); try 32 if VRAM allows.
   # ============================================================
   - <<: *template
     name: "E2V_ALL3_unfreeze2"
@@ -91,7 +95,8 @@ experiments:
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     unfreeze_audio_layers: 2
     audio_learning_rate: 5e-7
-    batch_size: 1
+    batch_size: 8
+    gradient_accumulation_steps: 8
 
   - <<: *template
     name: "E2V_ALL3_unfreeze4"
@@ -99,22 +104,24 @@ experiments:
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     unfreeze_audio_layers: 4
     audio_learning_rate: 5e-7
-    batch_size: 1
+
+    gradient_accumulation_steps: 8
 
   # ============================================================
   # 3. EMOTION2VEC + BERT UNFREEZE combined
   #    Two-tower finetuning: audio top-2 blocks + BERT top-4 layers.
-  #    Most VRAM-intensive single-stage config - keep batch_size: 1.
+  #    Most VRAM-intensive single-stage config.
   # ============================================================
   - <<: *template
-    name: "E2V_ALL3_uf2_bert_uf4"
+    name: "E2V_ALL3_uf2_roberta_uf4"
     train_dataset: ["IEMO", "MSPI", "MSPP"]
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     unfreeze_audio_layers: 2
     audio_learning_rate: 5e-7
     unfreeze_bert_layers: 4
     bert_learning_rate: 5e-7
-    batch_size: 1
+
+    gradient_accumulation_steps: 8
 
   # ============================================================
   # 4. TWO-STAGE TRAINING (frozen encoder, p70 prototypical subset)
@@ -122,13 +129,15 @@ experiments:
   #    Stage 2: full data at 10x lower LR.
   # ============================================================
   - <<: *template
-    name: "E2V_ALL3_twostage_p70"
+    name: "E2V_ROB_ALL3_twostage_p70"
     train_dataset: ["IEMO", "MSPI", "MSPP"]
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     use_two_stage_training: true
     stage1_percentile: 70
     stage1_epochs: 30
     stage2_lr_factor: 0.1
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
 
   # ============================================================
   # 5. FULL STACK: unfreeze + BERT + two-stage + prototypical weighting
@@ -148,7 +157,8 @@ experiments:
     stage2_lr_factor: 0.1
     use_prototypical_weighting: true
     prototypical_weighting_alpha: 2.0
-    batch_size: 1
+
+    gradient_accumulation_steps: 8
 
   - <<: *template
     name: "E2V_ALL3_fullstack_p70"
@@ -164,4 +174,5 @@ experiments:
     stage2_lr_factor: 0.1
     use_prototypical_weighting: true
     prototypical_weighting_alpha: 2.0
-    batch_size: 1
+
+    gradient_accumulation_steps: 8

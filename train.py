@@ -111,7 +111,7 @@ def _prepare_model_inputs(batch, config, model, device):
 
 def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 contrastive_criterion=None, domain_discriminator=None, domain_adv_loss=None,
-                proto_predictor=None, scaler=None):
+                proto_predictor=None, scaler=None, global_step=0):
     """
     Train for one epoch
 
@@ -127,11 +127,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         domain_adv_loss: Optional PrototypicalDomainAdversarialLoss
         proto_predictor: Optional PrototypicalityPredictor for auxiliary task
         scaler: Optional GradScaler for mixed precision
+        global_step: int - running step count for wandb logging
 
     Returns:
-        dict with loss and metrics
+        dict with loss, metrics, and updated global_step
     """
     use_amp = scaler is not None
+    accum_steps = max(1, getattr(config, 'gradient_accumulation_steps', 1))
     model.train()
     if domain_discriminator is not None:
         domain_discriminator.train()
@@ -149,7 +151,12 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     all_vad_preds = []
     all_vad_targets = []
 
-    for batch in dataloader:
+    optimizer.zero_grad()
+    num_batches = len(dataloader)
+
+    for batch_idx, batch in enumerate(dataloader):
+        is_last_batch = (batch_idx == num_batches - 1)
+        should_step = ((batch_idx + 1) % accum_steps == 0) or is_last_batch
         # Move to device
         labels = batch['label'].to(device)
 
@@ -197,8 +204,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     # Standard CE with reduction='none'
                     per_sample_loss = criterion(logits, labels)  # [B]
                 else:
-                    # Standard CE (already reduced)
-                    loss_primary = criterion(logits, labels)
+                    # Sum-based normalization: sum(w*CE) / B instead of sum(w*CE) / sum(w).
+                    # When divided by accum_steps at backward, gives sum(w*CE) / (accum_steps * B)
+                    # which is identical across micro-batches regardless of class composition.
+                    cls_weights = criterion.weight if hasattr(criterion, 'weight') else None
+                    loss_primary = F.cross_entropy(
+                        logits, labels, weight=cls_weights, reduction='sum'
+                    ) / labels.size(0)
 
                 if use_proto_weight or use_label_smooth:
                     if use_proto_weight:
@@ -268,17 +280,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             proto_pred_weight = getattr(config, 'proto_predictor_weight', 0.0)
             loss = loss_primary + config.contrastive_weight * loss_contrastive + adv_weight * loss_adversarial + proto_pred_weight * loss_proto_pred
 
-        # Backward (with scaler if mixed precision)
-        optimizer.zero_grad()
-        if use_amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
-
-        # Track losses
+        # Track losses (unscaled values)
         total_loss += loss.item()
         total_primary_loss += loss_primary.item()
         if config.use_contrastive:
@@ -287,6 +289,24 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             total_adversarial_loss += loss_adversarial.item()
         if proto_predictor is not None:
             total_proto_pred_loss += loss_proto_pred.item()
+
+        # Backward (scale loss for gradient accumulation)
+        scaled_loss = loss / accum_steps
+        if use_amp:
+            scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
+
+        # Optimizer step at accumulation boundary
+        if should_step:
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
+            global_step += 1
+            wandb.log({'train/step_loss': loss.item(), 'train/global_step': global_step})
 
     # Calculate metrics
     avg_loss = total_loss / len(dataloader)
@@ -308,6 +328,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         'contrastive_loss': avg_contrastive_loss,
         'adversarial_loss': avg_adversarial_loss,
         'proto_pred_loss': avg_proto_pred_loss,
+        'global_step': global_step,
         **metrics
     }
 
@@ -373,10 +394,14 @@ def evaluate(model, dataloader, criterion, device, config, use_amp=False):
     else:
         metrics = calculate_classification_metrics(all_predictions, all_labels)
 
-    return {
+    result = {
         'loss': avg_loss,
         **metrics
     }
+    if config.task_type == "classification":
+        result['predictions'] = all_predictions
+        result['labels'] = all_labels
+    return result
 
 
 def _compute_per_sample_difficulty(train_dataset, config):
@@ -464,17 +489,27 @@ def train(config, datasets=None):
         print(f"   Stage 1 epochs: {config.stage1_epochs}, Stage 2 LR factor: {config.stage2_lr_factor}")
 
     # Create dataloaders
+    num_workers = getattr(config, 'num_workers', 4)
+    pin_memory = device.type == 'cuda'
+    persistent = num_workers > 0
+
     train_loader = DataLoader(
         train_subset,
         batch_size=config.batch_size,
         shuffle=True,
-        collate_fn=vad_collate_fn
+        collate_fn=vad_collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent,
     )
     val_loader = DataLoader(
         val_subset,
         batch_size=config.batch_size,
         shuffle=False,
-        collate_fn=vad_collate_fn
+        collate_fn=vad_collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent,
     )
 
     test_loaders = []
@@ -483,7 +518,10 @@ def train(config, datasets=None):
             test_dataset,
             batch_size=config.batch_size,
             shuffle=False,
-            collate_fn=vad_collate_fn
+            collate_fn=vad_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
         )
         test_loaders.append(test_loader)
 
@@ -621,8 +659,8 @@ def train(config, datasets=None):
         param_groups.append({'params': audio_params, 'lr': audio_lr})
         print(f"   {audio_encoder_type} LR: {audio_lr:.2e}")
 
-    # All other model params
-    other_model_params = [p for p in model.parameters() if id(p) not in special_param_ids]
+    # All other trainable model params (exclude frozen encoder params)
+    other_model_params = [p for p in model.parameters() if p.requires_grad and id(p) not in special_param_ids]
     param_groups.append({'params': other_model_params, 'lr': config.learning_rate})
     print(f"   Main LR: {config.learning_rate:.2e}")
 
@@ -643,8 +681,10 @@ def train(config, datasets=None):
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
     print(f"   Scheduler: CosineAnnealingLR (T_max={config.num_epochs})")
 
-    # Mixed precision scaler (enabled for CUDA with wav2vec2 or when explicitly requested)
-    use_amp = device.type == 'cuda' and audio_encoder_type in ('wav2vec2', 'emotion2vec')
+    # Mixed precision: only useful when finetuning the encoder (saves activation memory during backward).
+    # Frozen encoder = no backward through it = no VRAM benefit, and fp16 risks NaN in randomly-init fusion.
+    unfreeze_audio_for_amp = getattr(config, 'unfreeze_audio_layers', 0) > 0
+    use_amp = device.type == 'cuda' and audio_encoder_type in ('wav2vec2', 'emotion2vec') and unfreeze_audio_for_amp
     scaler = GradScaler('cuda') if use_amp else None
     if use_amp:
         print(f"   Mixed precision (fp16): enabled")
@@ -655,6 +695,20 @@ def train(config, datasets=None):
         name=config.experiment_name,
         config=config.to_dict()
     )
+    # Per-step x-axis for training loss
+    wandb.define_metric("train/global_step")
+    wandb.define_metric("train/step_loss", step_metric="train/global_step")
+    # Per-epoch x-axis for everything else
+    wandb.define_metric("epoch")
+    wandb.define_metric("train/loss",         step_metric="epoch")
+    wandb.define_metric("train/primary_loss", step_metric="epoch")
+    wandb.define_metric("train/uar",          step_metric="epoch")
+    wandb.define_metric("train/accuracy",     step_metric="epoch")
+    wandb.define_metric("train/mae",          step_metric="epoch")
+    wandb.define_metric("train/ccc",          step_metric="epoch")
+    wandb.define_metric("val/*",              step_metric="epoch")
+    wandb.define_metric("test/*",             step_metric="epoch")
+    wandb.define_metric("stage",              step_metric="epoch")
 
     # Early stopping setup
     early_stopping_patience = getattr(config, 'early_stopping_patience', 10)
@@ -692,6 +746,7 @@ def train(config, datasets=None):
         ]
 
     global_epoch = 0
+    global_step = 0
 
     for stage in stages:
         stage_name = stage['name']
@@ -710,7 +765,10 @@ def train(config, datasets=None):
             stage_subset,
             batch_size=config.batch_size,
             shuffle=True,
-            collate_fn=vad_collate_fn
+            collate_fn=vad_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
         )
 
         # Apply LR factor for stage 2
@@ -738,8 +796,9 @@ def train(config, datasets=None):
             train_metrics = train_epoch(
                 model, stage_loader, criterion, optimizer, device, config,
                 contrastive_criterion, domain_discriminator, domain_adv_loss,
-                proto_predictor, scaler
+                proto_predictor, scaler, global_step
             )
+            global_step = train_metrics['global_step']
 
             # Step scheduler
             scheduler.step()

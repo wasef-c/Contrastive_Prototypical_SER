@@ -67,8 +67,7 @@ class EmotionClassifier(nn.Module):
             self.audio_dim = self.audio_encoder.get_output_dim()
         elif audio_encoder_type == "emotion2vec" and modality in ["audio", "both"]:
             self.audio_encoder = Emotion2VecEncoder(
-                checkpoint_path=audio_model_name,
-                upstream_dir=emotion2vec_upstream_dir,
+                model_name=audio_model_name,
                 unfreeze_layers=unfreeze_audio_layers,
             )
             self.audio_dim = self.audio_encoder.get_output_dim()

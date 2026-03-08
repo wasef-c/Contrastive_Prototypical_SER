@@ -4,21 +4,12 @@ Audio encoders: Wav2Vec2 and Emotion2Vec with optional partial unfreezing.
 Both mirror the FrozenBERTEncoder pattern from models/encoder.py.
 """
 
-from dataclasses import dataclass
 from typing import List, Optional
 
-import fairseq
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
-
-
-@dataclass
-class _UserDirModule:
-    """Minimal dataclass required by fairseq.utils.import_user_module."""
-
-    user_dir: str
 
 
 class Wav2Vec2Encoder(nn.Module):
@@ -135,10 +126,11 @@ class Wav2Vec2Encoder(nn.Module):
 
 class Emotion2VecEncoder(nn.Module):
     """
-    Finetunable Emotion2Vec encoder (data2vec_multi architecture).
+    Finetunable Emotion2Vec encoder using FunASR backend.
 
-    Loads emotion2vec_base.pt via fairseq and provides the same interface
-    as Wav2Vec2Encoder: raw waveforms in, mean-pooled [B, 768] out.
+    Loads iic/emotion2vec_base via FunASR AutoModel (same weights as
+    precomputed features) and provides the same interface as Wav2Vec2Encoder:
+    raw waveforms in, mean-pooled [B, 768] out.
 
     Supports optional unfreezing of the top N main transformer blocks
     (model.blocks) with the same freeze-all-then-unfreeze-top-N pattern.
@@ -146,15 +138,12 @@ class Emotion2VecEncoder(nn.Module):
 
     def __init__(
         self,
-        checkpoint_path: str,
-        upstream_dir: str,
+        model_name: str = "iic/emotion2vec_base",
         unfreeze_layers: int = 0,
     ):
         """
         Args:
-            checkpoint_path: Path to emotion2vec_base.pt checkpoint file.
-            upstream_dir: Path to the emotion2vec upstream models directory
-                          (contains models/emotion2vec.py, etc.).
+            model_name: FunASR model name or local path (default: iic/emotion2vec_base).
             unfreeze_layers: Number of top transformer blocks to unfreeze.
                              0 = fully frozen. Targets model.blocks[-N:].
         """
@@ -162,19 +151,12 @@ class Emotion2VecEncoder(nn.Module):
 
         self.unfreeze_layers = unfreeze_layers
 
-        # Register the upstream model code with fairseq so it can
-        # find and instantiate the data2vec_multi architecture.
-        _mod = _UserDirModule(upstream_dir)
-        fairseq.utils.import_user_module(_mod)
+        print(f"Loading Emotion2Vec model: {model_name}")
+        from funasr import AutoModel
+        auto_model = AutoModel(model=model_name)
+        self.model = auto_model.model  # Emotion2vec nn.Module
 
-        print(f"Loading Emotion2Vec model: {checkpoint_path}")
-        models, _cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
-            [checkpoint_path]
-        )
-        self.model = models[0]
-
-        # task.cfg.normalize controls per-sample layer-norm preprocessing
-        self.normalize: bool = task.cfg.normalize
+        self.normalize: bool = self.model.cfg.normalize
         self.output_dim: int = 768
 
         # Freeze all parameters first
@@ -191,15 +173,42 @@ class Emotion2VecEncoder(nn.Module):
                 for param in self.model.norm.parameters():
                     param.requires_grad = True
 
+            # Gradient checkpointing on unfrozen blocks: recomputes activations during
+            # backward instead of storing them, trading compute for VRAM. This allows
+            # larger batch sizes with the same memory budget.
+            self._apply_gradient_checkpointing(unfreeze_layers)
+
             trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.model.parameters())
             print(
                 f"  emotion2vec: unfroze top {unfreeze_layers}/{total_blocks} blocks "
                 f"({trainable:,}/{total:,} params trainable)"
             )
+            print(f"  Gradient checkpointing enabled on {unfreeze_layers} blocks")
         else:
             self.model.eval()
             print(f"  emotion2vec loaded and frozen (output_dim={self.output_dim})")
+
+    def _apply_gradient_checkpointing(self, num_blocks: int) -> None:
+        """Wrap the top N block forward methods with gradient checkpointing.
+
+        Recomputes activations during backward instead of storing them,
+        significantly reducing VRAM at the cost of ~30% extra compute.
+        Uses use_reentrant=False (PyTorch >=1.13) which handles None inputs.
+        """
+        import torch.utils.checkpoint as ckpt
+
+        for blk in self.model.blocks[-num_blocks:]:
+            orig_forward = blk.forward
+
+            def _make_wrapper(f):
+                def _wrapper(*args, **kwargs):
+                    # Flatten kwargs into positional for checkpoint compatibility
+                    # emotion2vec blocks: forward(x, padding_mask=None, alibi_bias=None)
+                    return ckpt.checkpoint(f, *args, use_reentrant=False, **kwargs)
+                return _wrapper
+
+            blk.forward = _make_wrapper(orig_forward)
 
     def forward(
         self,
@@ -209,6 +218,8 @@ class Emotion2VecEncoder(nn.Module):
         """
         Forward pass: raw waveforms -> mean-pooled features.
 
+        Batched processing with padding mask for efficiency.
+
         Args:
             waveforms: [batch_size, num_samples] raw audio at 16kHz.
             attention_mask: [batch_size, num_samples] 1=real audio, 0=padding.
@@ -216,14 +227,21 @@ class Emotion2VecEncoder(nn.Module):
         Returns:
             features: [batch_size, 768] mean-pooled representation.
         """
-        # Per-sample layer-norm preprocessing (matches original feature extraction)
+        # Mask-aware normalization: compute mean/std over real samples only
+        # (avoids padding zeros corrupting layer_norm statistics)
         if self.normalize:
-            waveforms = F.layer_norm(waveforms, waveforms.shape[1:])
+            if attention_mask is not None:
+                mask_f = attention_mask.float()  # [B, T]
+                lengths = mask_f.sum(dim=1, keepdim=True).clamp(min=1)  # [B, 1]
+                mean = (waveforms * mask_f).sum(dim=1, keepdim=True) / lengths
+                var = ((waveforms - mean) ** 2 * mask_f).sum(dim=1, keepdim=True) / lengths
+                waveforms = (waveforms - mean) / (var + 1e-5).sqrt()
+                waveforms = waveforms * mask_f  # re-zero padding
+            else:
+                waveforms = F.layer_norm(waveforms, waveforms.shape[1:])
 
-        # Convert attention_mask (1=real) to fairseq padding_mask (True=pad)
-        padding_mask: Optional[torch.Tensor] = None
-        if attention_mask is not None:
-            padding_mask = attention_mask == 0
+        # Convert attention_mask (1=real, 0=pad) to padding_mask (True=pad, False=real)
+        padding_mask = ~attention_mask.bool() if attention_mask is not None else None
 
         if self.unfreeze_layers == 0:
             self.model.eval()
