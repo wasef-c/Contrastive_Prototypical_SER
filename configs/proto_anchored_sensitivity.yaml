@@ -1,0 +1,217 @@
+# Proto-Anchored Sensitivity Analysis
+# Base: UF4 + BERT4 + proto_anchored (best config from contrastive ablation)
+# One-at-a-time hyperparameter sweeps, then best combo + prototypical CE weighting.
+# Run with: python runner.py --config configs/proto_anchored_sensitivity.yaml --all
+#
+# VRAM budget: 24 GB
+# Baseline reference: MSPP_UF4_proto_anchored_BERT (CMU=0.556, SAM=0.685)
+# Default params: cw=0.5, alpha=1.0, beta=0.5, mb=0.1, sm=2.0, sw=0.5, temp=0.07
+
+template_config: &template
+  wandb_project: "Proto_anchored_sensitivity"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder — UF4
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 4
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT — UF4
+  unfreeze_bert_layers: 4
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 50
+  batch_size: 8
+  gradient_accumulation_steps: 20
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Proto-Anchored contrastive (ON by default for this sweep)
+  use_contrastive: true
+  contrastive_loss_type: "prototype_anchored"
+  contrastive_weight: 0.5
+  contrastive_temperature: 0.07
+  contrastive_warmup_epochs: 5
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Proto-Anchored loss defaults
+  prototypical_alpha: 1.0
+  prototypical_beta: 0.5
+  margin_base: 0.1
+  separation_margin: 2.0
+  separation_weight: 0.5
+
+  # Two-stage off
+  use_two_stage_training: false
+
+  # Prototypical CE weighting off by default
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_domain_adversarial: false
+  use_proto_predictor: false
+
+  # Dataset — MSPP only, 4 test sets
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # SECTION 1: contrastive_weight sensitivity
+  # Default = 0.5 (already ran). Test 0.3, 0.7, 1.0
+  # ============================================================
+
+  - <<: *template
+    name: "SA_cw03"
+    contrastive_weight: 0.3
+
+  - <<: *template
+    name: "SA_cw07"
+    contrastive_weight: 0.7
+
+  - <<: *template
+    name: "SA_cw10"
+    contrastive_weight: 1.0
+
+  # ============================================================
+  # SECTION 2: alpha sensitivity (prototypicality weight decay)
+  # Default = 1.0. Higher = more focus on prototypical samples.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_alpha05"
+    prototypical_alpha: 0.5
+
+  - <<: *template
+    name: "SA_alpha20"
+    prototypical_alpha: 2.0
+
+  - <<: *template
+    name: "SA_alpha30"
+    prototypical_alpha: 3.0
+
+  # ============================================================
+  # SECTION 3: beta sensitivity (margin scaling with difficulty)
+  # Default = 0.5. Higher = more slack for atypical samples.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_beta02"
+    prototypical_beta: 0.2
+
+  - <<: *template
+    name: "SA_beta10"
+    prototypical_beta: 1.0
+
+  # ============================================================
+  # SECTION 4: margin_base sensitivity
+  # Default = 0.1. Minimum distance to own prototype.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_mb005"
+    margin_base: 0.05
+
+  - <<: *template
+    name: "SA_mb02"
+    margin_base: 0.2
+
+  # ============================================================
+  # SECTION 5: separation_margin sensitivity
+  # Default = 2.0. Min distance between class prototypes.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_sm10"
+    separation_margin: 1.0
+
+  - <<: *template
+    name: "SA_sm30"
+    separation_margin: 3.0
+
+  # ============================================================
+  # SECTION 6: separation_weight sensitivity
+  # Default = 0.5. How much to weight the prototype separation term.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_sw025"
+    separation_weight: 0.25
+
+  - <<: *template
+    name: "SA_sw10"
+    separation_weight: 1.0
+
+  # ============================================================
+  # SECTION 7: temperature sensitivity
+  # Default = 0.07. Lower = sharper similarity distribution.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_temp005"
+    contrastive_temperature: 0.05
+
+  - <<: *template
+    name: "SA_temp010"
+    contrastive_temperature: 0.10
+
+  # ============================================================
+  # SECTION 8: Proto-anchored + prototypical CE weighting
+  # Adds difficulty-weighted CE on top of proto-anchored contrastive.
+  # ============================================================
+
+  - <<: *template
+    name: "SA_protoweight_a10"
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 1.0
+
+  - <<: *template
+    name: "SA_protoweight_a20"
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  - <<: *template
+    name: "SA_protoweight_a30"
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 3.0
+
+  # ============================================================
+  # SECTION 9: unfrozen 6
+  - <<: *template
+    name: "Unfrozen_emotion2vec6"
+    batch_size: 6
+    unfreeze_audio_layers: 6
+
+  - <<: *template
+    name: "Unfrozen_bert6"
+    batch_size: 6
+    unfreeze_bert_layers: 6

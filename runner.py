@@ -29,7 +29,12 @@ def _dataset_cache_key(config):
     modality = getattr(config, 'modality', 'both')
     task_type = getattr(config, 'task_type', 'classification')
 
-    return (train_ds, test_ds, audio_type, modality, task_type)
+    # Frozen vs unfrozen encoders can't share datasets: frozen experiments
+    # cache features (destroying raw audio), unfrozen need raw waveforms.
+    unfreeze = getattr(config, 'unfreeze_audio_layers', 0)
+    needs_raw_audio = (audio_type in ('wav2vec2', 'emotion2vec')) and unfreeze > 0
+
+    return (train_ds, test_ds, audio_type, modality, task_type, needs_raw_audio)
 
 
 def preload_datasets(yaml_path):
@@ -309,6 +314,11 @@ def run_all_experiments(yaml_path):
             import traceback
             print(f"Experiment {exp_name} failed: {e}")
             traceback.print_exc()
+            # Close the wandb run so it doesn't leak into the next experiment
+            try:
+                wandb.finish(exit_code=1)
+            except Exception:
+                pass
             results.append({
                 'index': exp_idx,
                 'name': exp_name,

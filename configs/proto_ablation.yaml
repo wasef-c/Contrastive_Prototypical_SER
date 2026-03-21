@@ -1,0 +1,181 @@
+# Prototypicality Ablation with Unfrozen Emotion2Vec
+# Tests whether prototypical methods help more when encoder is trainable.
+# Also ablates unfreeze depth (2 vs 4) and BERT unfreeze.
+# Run with: python runner.py --config configs/proto_ablation.yaml --all
+#
+# VRAM budget: 24 GB
+
+template_config: &template
+  wandb_project: "emotion2vec_finetune_sweep_V2_LOLLL"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 2
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT defaults (frozen)
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training (template targets unfreeze 2 — ran fine at batch_size=16)
+  num_epochs: 50
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Two-stage defaults (off)
+  use_two_stage_training: false
+  stage1_percentile: 50
+  stage1_epochs: 30
+  stage2_lr_factor: 0.1
+
+  # Proto defaults (off)
+  use_contrastive: false
+  contrastive_weight: 0.0
+  use_domain_adversarial: false
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  # Datasets
+  train_dataset: ["IEMO", "MSPI", "MSPP"]
+  test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # SECTION A: Unfreeze 2 blocks — prototypicality ablation
+  # ============================================================
+
+  # A1. Baseline: unfreeze 2, no proto (ALREADY RAN — CMU=0.525, SAM=0.677)
+  # - <<: *template
+  #   name: "UF2_baseline"
+
+  # A2. + two-stage p50
+  - <<: *template
+    name: "UF2_twostage_p50"
+    use_two_stage_training: true
+    stage1_percentile: 50
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+
+  # A3. + two-stage p70
+  - <<: *template
+    name: "UF2_twostage_p70"
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+
+  # A4. + prototypical weighting only
+  - <<: *template
+    name: "UF2_proto_weight"
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  # A5. + prototypical label smoothing only
+  - <<: *template
+    name: "UF2_proto_labelsmooth"
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+    label_smoothing_max: 0.6
+
+  # A6. + two-stage p70 + proto weighting (full proto stack)
+  - <<: *template
+    name: "UF2_twostage_p70_protoweight"
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+
+  # A7. + two-stage p70 + label smoothing
+  - <<: *template
+    name: "UF2_twostage_p70_labelsmooth"
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_label_smoothing: true
+    label_smoothing_beta: 0.5
+    label_smoothing_max: 0.6
+
+  # ============================================================
+  # SECTION B: Unfreeze 4 blocks — does deeper unfreeze + proto help more?
+  # ============================================================
+
+  # B1. Baseline: unfreeze 4, no proto
+  - <<: *template
+    name: "UF4_baseline"
+    unfreeze_audio_layers: 4
+    batch_size: 4
+    gradient_accumulation_steps: 32
+
+  # B2. + two-stage p70 + proto weighting (best combo from section A, presumably)
+  - <<: *template
+    name: "UF4_twostage_p70_protoweight"
+    unfreeze_audio_layers: 4
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 4
+    gradient_accumulation_steps: 32
+
+  # ============================================================
+  # SECTION C: Unfreeze 2 + BERT unfreeze 4 — dual-tower + proto
+  # ============================================================
+
+  # C1. Baseline: UF2 + BERT UF4, no proto
+  - <<: *template
+    name: "UF2_BERT4_baseline"
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    batch_size: 4
+    gradient_accumulation_steps: 32
+
+  # C2. + two-stage p70 + proto weighting
+  - <<: *template
+    name: "UF2_BERT4_twostage_p70_protoweight"
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+    use_two_stage_training: true
+    stage1_percentile: 70
+    stage1_epochs: 30
+    stage2_lr_factor: 0.1
+    use_prototypical_weighting: true
+    prototypical_weighting_alpha: 2.0
+    batch_size: 4
+    gradient_accumulation_steps: 32

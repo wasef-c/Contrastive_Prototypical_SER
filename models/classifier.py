@@ -102,7 +102,7 @@ class EmotionClassifier(nn.Module):
         if use_projection_head:
             self.projection_head = nn.Sequential(
                 nn.Linear(hidden_dim, projection_hidden_dim),
-                nn.BatchNorm1d(projection_hidden_dim),
+                nn.LayerNorm(projection_hidden_dim),
                 nn.ReLU(),
                 nn.Linear(projection_hidden_dim, projection_dim),
             )

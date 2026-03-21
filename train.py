@@ -3,6 +3,9 @@
 Clean training script for emotion recognition with contrastive learning
 """
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -489,9 +492,10 @@ def train(config, datasets=None):
         print(f"   Stage 1 epochs: {config.stage1_epochs}, Stage 2 LR factor: {config.stage2_lr_factor}")
 
     # Create dataloaders
-    num_workers = getattr(config, 'num_workers', 4)
+    num_workers = getattr(config, 'num_workers', 2)
     pin_memory = device.type == 'cuda'
     persistent = num_workers > 0
+    prefetch = 2 if num_workers > 0 else None
 
     train_loader = DataLoader(
         train_subset,
@@ -501,6 +505,7 @@ def train(config, datasets=None):
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
     val_loader = DataLoader(
         val_subset,
@@ -510,6 +515,7 @@ def train(config, datasets=None):
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
 
     test_loaders = []
@@ -532,6 +538,16 @@ def train(config, datasets=None):
     print(f"   Task: {config.task_type}")
     print(f"   Audio encoder: {getattr(config, 'audio_encoder_type', 'preextracted')}")
     print(f"   Contrastive: {config.use_contrastive}")
+
+    # Cache frozen encoder features: compute once, reuse every epoch (~100x faster)
+    audio_encoder_type = getattr(config, 'audio_encoder_type', 'preextracted')
+    if (audio_encoder_type in ('wav2vec2', 'emotion2vec')
+            and getattr(config, 'unfreeze_audio_layers', 0) == 0
+            and hasattr(model, 'audio_encoder') and model.audio_encoder is not None):
+        print(f"\n  Caching frozen encoder features (one-time cost)...")
+        train_dataset.cache_encoder_features(model.audio_encoder, device, batch_size=config.batch_size)
+        for td in test_datasets:
+            td.cache_encoder_features(model.audio_encoder, device, batch_size=config.batch_size)
 
     # Create loss functions
     if config.task_type == "regression":
@@ -681,13 +697,13 @@ def train(config, datasets=None):
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
     print(f"   Scheduler: CosineAnnealingLR (T_max={config.num_epochs})")
 
-    # Mixed precision: only useful when finetuning the encoder (saves activation memory during backward).
-    # Frozen encoder = no backward through it = no VRAM benefit, and fp16 risks NaN in randomly-init fusion.
+    # Mixed precision (fp16): speeds up forward pass and saves VRAM.
+    # GradScaler only needed when unfreezing (backward through encoder).
+    use_amp = device.type == 'cuda'
     unfreeze_audio_for_amp = getattr(config, 'unfreeze_audio_layers', 0) > 0
-    use_amp = device.type == 'cuda' and audio_encoder_type in ('wav2vec2', 'emotion2vec') and unfreeze_audio_for_amp
-    scaler = GradScaler('cuda') if use_amp else None
+    scaler = GradScaler('cuda') if (use_amp and unfreeze_audio_for_amp) else None
     if use_amp:
-        print(f"   Mixed precision (fp16): enabled")
+        print(f"   Mixed precision (fp16): enabled (scaler={'on' if scaler else 'off'})")
 
     # Initialize WandB
     wandb.init(
@@ -906,7 +922,25 @@ def train(config, datasets=None):
             wandb.log({
                 f'test/{dataset_name}_acc': test_metrics['accuracy'],
                 f'test/{dataset_name}_uar': test_metrics['uar'],
+                f'cm/test_{dataset_name}': wandb.plot.confusion_matrix(
+                    preds=test_metrics['predictions'],
+                    y_true=test_metrics['labels'],
+                    class_names=['neutral', 'happy', 'sad', 'angry'],
+                    title=f'{dataset_name} (best model)',
+                ),
             })
+
+    # Val confusion matrix (best model)
+    if config.task_type == "classification":
+        val_best = evaluate(model, val_loader, criterion, device, config, use_amp)
+        wandb.log({
+            'cm/val': wandb.plot.confusion_matrix(
+                preds=val_best['predictions'],
+                y_true=val_best['labels'],
+                class_names=['neutral', 'happy', 'sad', 'angry'],
+                title='Validation (best model)',
+            ),
+        })
 
     # Save model
     save_dir = Path("saved_models")

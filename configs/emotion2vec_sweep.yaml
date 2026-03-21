@@ -42,8 +42,8 @@ template_config: &template
   # Training - batch_size: 2 + accumulation: 4 = effective batch of 4, ~4x less VRAM per step
   # batch_size: 1 + accumulation: 128 = effective batch 128, matches preextracted baseline dynamics
   num_epochs: 50
-  batch_size: 8
-  gradient_accumulation_steps: 32
+  batch_size: 20
+  gradient_accumulation_steps: 6
   learning_rate: 5e-6
   weight_decay: 1e-4
   val_split: 0.1
@@ -75,11 +75,11 @@ experiments:
   # 1. BASELINE - emotion2vec fully frozen
   #    Establishes the ceiling from pretrained features alone.
   # ============================================================
-  - <<: *template
-    name: "PAR_E2V_ALL3_frozen_baseline"
-    train_dataset: ["IEMO", "MSPI", "MSPP"]
-    test_datasets: ["CMUMOSEI", "SAMSEMO"]
-    unfreeze_audio_layers: 0
+  # - <<: *template
+  #   name: "PAR_E2V_ALL3_frozen_baseline"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   unfreeze_audio_layers: 0
     # audio_encoder_type: "preextracted"
 
 
@@ -89,14 +89,14 @@ experiments:
   #    AMP + gradient checkpointing enabled automatically when unfreeze_audio_layers > 0.
   #    Start with batch_size: 16 (conservative); try 32 if VRAM allows.
   # ============================================================
-  - <<: *template
-    name: "E2V_ALL3_unfreeze2"
-    train_dataset: ["IEMO", "MSPI", "MSPP"]
-    test_datasets: ["CMUMOSEI", "SAMSEMO"]
-    unfreeze_audio_layers: 2
-    audio_learning_rate: 5e-7
-    batch_size: 8
-    gradient_accumulation_steps: 8
+  # - <<: *template
+  #   name: "E2V_ALL3_unfreeze2"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   unfreeze_audio_layers: 2
+  #   audio_learning_rate: 5e-7
+
+  #   gradient_accumulation_steps: 8
 
   - <<: *template
     name: "E2V_ALL3_unfreeze4"
@@ -104,8 +104,8 @@ experiments:
     test_datasets: ["CMUMOSEI", "SAMSEMO"]
     unfreeze_audio_layers: 4
     audio_learning_rate: 5e-7
-
-    gradient_accumulation_steps: 8
+    batch_size: 4
+    gradient_accumulation_steps: 32
 
   # ============================================================
   # 3. EMOTION2VEC + BERT UNFREEZE combined
@@ -120,8 +120,8 @@ experiments:
     audio_learning_rate: 5e-7
     unfreeze_bert_layers: 4
     bert_learning_rate: 5e-7
-
-    gradient_accumulation_steps: 8
+    batch_size: 4
+    gradient_accumulation_steps: 32
 
   # ============================================================
   # 4. TWO-STAGE TRAINING (frozen encoder, p70 prototypical subset)
@@ -138,27 +138,29 @@ experiments:
     stage2_lr_factor: 0.1
     unfreeze_bert_layers: 4
     bert_learning_rate: 5e-7
+    batch_size: 4
+    gradient_accumulation_steps: 32
 
   # ============================================================
   # 5. FULL STACK: unfreeze + BERT + two-stage + prototypical weighting
   #    p50 and p70 variants.
   # ============================================================
-  - <<: *template
-    name: "E2V_ALL3_fullstack_p50"
-    train_dataset: ["IEMO", "MSPI", "MSPP"]
-    test_datasets: ["CMUMOSEI", "SAMSEMO"]
-    unfreeze_audio_layers: 2
-    audio_learning_rate: 5e-7
-    unfreeze_bert_layers: 4
-    bert_learning_rate: 5e-7
-    use_two_stage_training: true
-    stage1_percentile: 50
-    stage1_epochs: 30
-    stage2_lr_factor: 0.1
-    use_prototypical_weighting: true
-    prototypical_weighting_alpha: 2.0
-
-    gradient_accumulation_steps: 8
+  # - <<: *template
+  #   name: "E2V_ALL3_fullstack_p50"
+  #   train_dataset: ["IEMO", "MSPI", "MSPP"]
+  #   test_datasets: ["CMUMOSEI", "SAMSEMO"]
+  #   unfreeze_audio_layers: 2
+  #   audio_learning_rate: 5e-7
+  #   unfreeze_bert_layers: 4
+  #   bert_learning_rate: 5e-7
+  #   use_two_stage_training: true
+  #   stage1_percentile: 50
+  #   stage1_epochs: 30
+  #   stage2_lr_factor: 0.1
+  #   use_prototypical_weighting: true
+  #   prototypical_weighting_alpha: 2.0
+  #   batch_size: 4
+  #   gradient_accumulation_steps: 32
 
   - <<: *template
     name: "E2V_ALL3_fullstack_p70"
@@ -174,5 +176,5 @@ experiments:
     stage2_lr_factor: 0.1
     use_prototypical_weighting: true
     prototypical_weighting_alpha: 2.0
-
-    gradient_accumulation_steps: 8
+    batch_size: 4
+    gradient_accumulation_steps: 32

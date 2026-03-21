@@ -1,0 +1,253 @@
+# Contrastive Learning Ablation with Unfrozen Emotion2Vec
+# Train on MSPP only → test on IEMO, MSPI, CMUMOSEI, SAMSEMO (4 test sets).
+# Ablates: contrastive loss type, unfreeze depth (E2V 0/2/4, BERT 0/4).
+# Run with: python runner.py --config configs/contrastive_ablation.yaml --all
+#
+# VRAM budget: 24 GB
+
+template_config: &template
+  wandb_project: "emotion2vec_finetune_sweep_V2_LOLLL"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 2
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT defaults (frozen)
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 50
+  batch_size: 6
+  gradient_accumulation_steps: 20
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Contrastive defaults (off unless overridden)
+  use_contrastive: false
+  contrastive_loss_type: "supervised"
+  contrastive_weight: 0.5
+  contrastive_temperature: 0.07
+  contrastive_warmup_epochs: 5
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Two-stage defaults (off)
+  use_two_stage_training: false
+  stage1_percentile: 50
+  stage1_epochs: 30
+  stage2_lr_factor: 0.1
+
+  # Proto defaults (off)
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_domain_adversarial: false
+  use_proto_predictor: false
+
+  # Dataset — MSPP only, 4 test sets
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  expected_vad:
+    0: [0.4896, 0.5458, 0.5458]
+    1: [0.7127, 0.5518, 0.5518]
+    2: [0.3060, 0.4895, 0.4895]
+    3: [0.2397, 0.6102, 0.6102]
+
+
+experiments:
+  # ============================================================
+  # SECTION A: UF2 baseline + contrastive loss type ablation
+  # All use unfreeze_audio_layers: 2, BERT frozen
+  # ============================================================
+
+  # # A0. Baseline: UF2, no contrastive (reference point)
+  # - <<: *template
+  #   name: "MSPP_UF2_baseline"
+
+  # # A1. Supervised Contrastive (SupCon)
+  # - <<: *template
+  #   name: "MSPP_UF2_supcon"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.5
+
+  # # A2. Prototypical V1 (sample weighting by difficulty)
+  # - <<: *template
+  #   name: "MSPP_UF2_proto_v1"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototypical_v1"
+  #   contrastive_weight: 0.5
+  #   prototypical_alpha: 1.0
+
+  # # A3. Prototypical V2 (pair weighting by combined difficulty)
+  # - <<: *template
+  #   name: "MSPP_UF2_proto_v2"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototypical_v2"
+  #   contrastive_weight: 0.5
+
+  # # A4. Prototype-Anchored (VAD-guided learnable prototypes)
+  # - <<: *template
+  #   name: "MSPP_UF2_proto_anchored"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.5
+
+  # # A5. SupCon with higher weight (0.8)
+  # - <<: *template
+  #   name: "MSPP_UF2_supcon_w08"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.8
+
+  # # A6. Prototype-Anchored with higher weight (0.8)
+  # - <<: *template
+  #   name: "MSPP_UF2_proto_anchored_w08"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.8
+
+  # ============================================================
+  # SECTION B: Best contrastive + unfreeze depth ablation
+  # Tests UF0 (frozen), UF4 (deeper), UF2+BERT4 (dual tower)
+  # ============================================================
+
+  # # B1. Frozen encoder + SupCon
+  # - <<: *template
+  #   name: "MSPP_UF0_supcon"
+  #   unfreeze_audio_layers: 0
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.5
+  #   batch_size: 20
+  #   gradient_accumulation_steps: 6
+
+  # # B2. Frozen encoder + Prototype-Anchored
+  # - <<: *template
+  #   name: "MSPP_UF0_proto_anchored"
+  #   unfreeze_audio_layers: 0
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.5
+  #   batch_size: 20
+  #   gradient_accumulation_steps: 6
+
+  # # B3. UF4 + SupCon
+  # - <<: *template
+  #   name: "MSPP_UF4_supcon"
+  #   unfreeze_audio_layers: 4
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.5
+  #   batch_size: 6
+  #   gradient_accumulation_steps: 20
+
+  # # B4. UF4 + Prototype-Anchored
+  # - <<: *template
+  #   name: "MSPP_UF4_proto_anchored"
+  #   unfreeze_audio_layers: 4
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.5
+  #   batch_size: 6
+  #   gradient_accumulation_steps: 20
+
+  # # B5. UF2 + BERT UF4 + SupCon
+  # - <<: *template
+  #   name: "MSPP_UF2_BERT4_supcon"
+  #   unfreeze_bert_layers: 4
+  #   bert_learning_rate: 5e-7
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.5
+  #   batch_size: 6
+  #   gradient_accumulation_steps: 20
+
+  # # B6. UF2 + BERT UF4 + Prototype-Anchored
+  # - <<: *template
+  #   name: "MSPP_UF2_BERT4_proto_anchored"
+  #   unfreeze_bert_layers: 4
+  #   bert_learning_rate: 5e-7
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.5
+  #   batch_size: 6
+  #   gradient_accumulation_steps: 20
+
+  # # ============================================================
+  # # SECTION C: Contrastive + two-stage curriculum (combined)
+  # # ============================================================
+
+  # # C1. UF2 + SupCon + two-stage p70
+  # - <<: *template
+  #   name: "MSPP_UF2_supcon_twostage_p70"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "supervised"
+  #   contrastive_weight: 0.5
+  #   use_two_stage_training: true
+  #   stage1_percentile: 70
+  #   stage1_epochs: 30
+  #   stage2_lr_factor: 0.1
+
+  # # C2. UF2 + Prototype-Anchored + two-stage p70
+  # - <<: *template
+  #   name: "MSPP_UF2_proto_anchored_twostage_p70"
+  #   use_contrastive: true
+  #   contrastive_loss_type: "prototype_anchored"
+  #   contrastive_weight: 0.5
+  #   use_two_stage_training: true
+  #   stage1_percentile: 70
+  #   stage1_epochs: 30
+  #   stage2_lr_factor: 0.1
+
+
+  # B3. UF4 + SupCon
+  - <<: *template
+    name: "MSPP_UF4_Baseline"
+    unfreeze_audio_layers: 4
+    batch_size: 6
+    gradient_accumulation_steps: 20
+  
+  - <<: *template
+    name: "MSPP_UF4_BERT_Baseline"
+    unfreeze_audio_layers: 4
+    batch_size: 6
+    gradient_accumulation_steps: 20
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7
+
+  # B4. UF4 + Prototype-Anchored
+  - <<: *template
+    name: "MSPP_UF4_proto_anchored_BERT"
+    unfreeze_audio_layers: 4
+    use_contrastive: true
+    contrastive_loss_type: "prototype_anchored"
+    contrastive_weight: 0.5
+    batch_size: 6
+    gradient_accumulation_steps: 20
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-7

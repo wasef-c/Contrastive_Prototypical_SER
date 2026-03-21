@@ -28,9 +28,12 @@ class EmotionDataset(Dataset):
     DATASET_MAP = {
         "IEMO": "cairocode/IEMO_Audio_Text_Merged",
         "MSPI": "cairocode/MSPI_Audio_Text_Merged",
-        "MSPP": "cairocode/MSPP_Audio_Text_Merged",
-        "CMUMOSEI": "cairocode/CMUMOSEI_Emotion2Vec_PrecomputedEncodings",
-        "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
+        # "MSPP": "cairocode/MSPP_Audio_Text_Merged",
+        # "CMUMOSEI": "cairocode/CMUMOSEI_Emotion2Vec_PrecomputedEncodings",
+        # "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
+        "MSPP": "cairocode/MSPP_WAV",
+        "CMUMOSEI": "cairocode/cmu_mosei_wav_2",
+        "SAMSEMO": "cairocode/samsemo-audio",
     }
 
     # Alternative HF paths for raw audio (wav2vec2/emotion2vec online encoder)
@@ -192,6 +195,54 @@ class EmotionDataset(Dataset):
         if skipped_label_count > 0:
             print(f"   Skipped {skipped_label_count} samples with label > 3")
 
+    def cache_encoder_features(self, encoder, device, batch_size=16):
+        """
+        Precompute and cache all audio encoder features, converting this dataset
+        from lazy waveform loading to cached feature mode. After caching, each
+        epoch is as fast as preextracted features.
+
+        Only useful when the encoder is frozen (features don't change between epochs).
+
+        Args:
+            encoder: Audio encoder module (Emotion2VecEncoder or Wav2Vec2Encoder)
+            device: torch device
+            batch_size: Number of clips to process at once
+        """
+        if not self.uses_raw_audio:
+            return  # Already using preextracted features
+
+        print(f"  Caching {len(self.data)} encoder features for {self.dataset_name}...")
+        encoder.eval()
+
+        from data.collate import vad_collate_fn
+        from torch.utils.data import DataLoader
+
+        temp_loader = DataLoader(
+            self, batch_size=batch_size, shuffle=False,
+            collate_fn=vad_collate_fn, num_workers=0,
+        )
+
+        all_features = []
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(temp_loader):
+                waveforms = batch['waveforms'].to(device)
+                mask = batch['audio_attention_mask'].to(device)
+                feats = encoder(waveforms, mask)  # [B, 768]
+                all_features.append(feats.cpu())
+                if (batch_idx + 1) % 100 == 0:
+                    print(f"    {(batch_idx+1)*batch_size}/{len(self.data)} cached...")
+
+        all_features = torch.cat(all_features, dim=0)  # [N, 768]
+
+        # Replace lazy loading with cached features
+        for i, sample in enumerate(self.data):
+            sample.pop("hf_idx", None)
+            sample["features"] = all_features[i]
+
+        self.uses_raw_audio = False
+        self.hf_dataset = None  # Free HF dataset memory
+        print(f"  Cached {len(self.data)} features ({all_features.shape})")
+
     def __len__(self):
         return len(self.data)
 
@@ -271,6 +322,17 @@ class MultiCorpusDataset(Dataset):
         print(f"  Combined {len(datasets)} datasets: {self.dataset_name} ({len(self.data)} total samples)")
         for ds in datasets:
             print(f"   - {ds.dataset_name}: {len(ds.data)} samples")
+
+    def cache_encoder_features(self, encoder, device, batch_size=16):
+        """Cache features for all sub-datasets."""
+        for ds in self.datasets:
+            ds.cache_encoder_features(encoder, device, batch_size)
+        # Rebuild combined data list after caching
+        self.data = []
+        self._cumulative = [0]
+        for ds in self.datasets:
+            self.data.extend(ds.data)
+            self._cumulative.append(self._cumulative[-1] + len(ds.data))
 
     def __len__(self):
         return len(self.data)
