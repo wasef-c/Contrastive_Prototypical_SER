@@ -78,6 +78,27 @@ class Config:
         self.separation_weight = 0.5  # Weight for prototype separation loss
         self.alignment_weight = 1.0  # Weight for cross-domain alignment (multiDS)
 
+        # Multi-view prototypicality
+        self.use_multiview_prototypicality = False
+        self.mv_weight_vad = 0.4    # Weight for VAD distance view
+        self.mv_weight_cross = 0.3  # Weight for cross-modal agreement view
+        self.mv_weight_embed = 0.3  # Weight for embedding-space distance view
+
+        # Hard negative mining
+        self.use_hard_negative_mining = False
+        self.hard_negative_weight = 0.3
+
+        # Prototype memory bank
+        self.use_memory_bank = False
+        self.bank_size = 64
+        self.bank_momentum = 0.5
+        self.bank_threshold = 0.5
+
+        # Cross-modal projection
+        self.use_cross_modal_projection = False
+        self.cross_modal_dim = 256
+        self.cross_modal_weight = 0.1
+
         # Prototypicality-weighted primary loss
         self.use_prototypical_weighting = False
         self.prototypical_weighting_alpha = 2.0  # exp(-alpha * difficulty)
@@ -135,6 +156,10 @@ class Config:
             'unfreeze_audio_layers', 'audio_learning_rate',
             'stage1_percentile', 'stage1_epochs', 'stage2_lr_factor',
             'max_audio_seconds', 'gradient_accumulation_steps',
+            'mv_weight_vad', 'mv_weight_cross', 'mv_weight_embed',
+            'hard_negative_weight',
+            'bank_size', 'bank_momentum', 'bank_threshold',
+            'cross_modal_dim', 'cross_modal_weight',
         ]
 
         for field in numeric_fields:
@@ -152,6 +177,7 @@ class Config:
             'proto_predictor_hidden_dim',
             'unfreeze_bert_layers',
             'unfreeze_audio_layers', 'stage1_epochs', 'gradient_accumulation_steps',
+            'bank_size', 'cross_modal_dim',
         ]
 
         for field in int_fields:

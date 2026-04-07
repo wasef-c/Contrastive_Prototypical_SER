@@ -27,6 +27,7 @@ from models.domain_adversarial import DomainDiscriminator, PrototypicalDomainAdv
 from models.prototypicality_predictor import PrototypicalityPredictor
 from utils.metrics import calculate_classification_metrics, calculate_vad_metrics
 from utils.prototypicality import batch_calculate_difficulty, calculate_difficulty
+from utils.multiview_prototypicality import compute_multiview_difficulty
 
 
 def soft_cross_entropy(logits, soft_targets, class_weights=None):
@@ -114,7 +115,7 @@ def _prepare_model_inputs(batch, config, model, device):
 
 def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 contrastive_criterion=None, domain_discriminator=None, domain_adv_loss=None,
-                proto_predictor=None, scaler=None, global_step=0):
+                proto_predictor=None, scaler=None, global_step=0, current_epoch=0):
     """
     Train for one epoch
 
@@ -154,6 +155,14 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     all_vad_preds = []
     all_vad_targets = []
 
+    # Contrastive weight warm-up: linear ramp from 0 → target over warmup epochs
+    warmup_epochs = getattr(config, 'contrastive_warmup_epochs', 5)
+    if warmup_epochs > 0 and current_epoch < warmup_epochs:
+        warmup_factor = current_epoch / warmup_epochs
+    else:
+        warmup_factor = 1.0
+    effective_contrastive_weight = config.contrastive_weight * warmup_factor
+
     optimizer.zero_grad()
     num_batches = len(dataloader)
 
@@ -170,10 +179,12 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         use_embeddings = config.use_contrastive or getattr(config, 'use_domain_adversarial', False) or getattr(config, 'use_proto_predictor', False)
         raw_embeddings = None
         embeddings_norm = None
+        modal_features = None
 
         with autocast('cuda', enabled=use_amp):
             if use_embeddings:
-                logits, projected_embeddings, raw_embeddings = model(**model_inputs, return_embeddings=True)
+                result = model(**model_inputs, return_embeddings=True)
+                logits, projected_embeddings, raw_embeddings, modal_features = result
                 embeddings_norm = F.normalize(projected_embeddings, p=2, dim=1)
             else:
                 logits = model(**model_inputs)
@@ -247,7 +258,19 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     dataset_ids = torch.tensor([corpus_to_id[n] for n in corpus_names], device=device)
                     loss_contrastive = contrastive_criterion(embeddings_norm, labels, difficulties, dataset_ids)
                 elif loss_type.startswith('prototypical') or loss_type == 'prototype_anchored':
-                    difficulties = batch_calculate_difficulty(batch, config.expected_vad).to(device)
+                    # Multi-view prototypicality: combine VAD + cross-modal + embedding views
+                    use_multiview = getattr(config, 'use_multiview_prototypicality', False)
+                    if use_multiview and loss_type == 'prototype_anchored':
+                        prototypes = contrastive_criterion.prototypes
+                        difficulties = compute_multiview_difficulty(
+                            batch, config.expected_vad, modal_features,
+                            embeddings_norm, labels, prototypes, device,
+                            w_vad=getattr(config, 'mv_weight_vad', 0.4),
+                            w_cross=getattr(config, 'mv_weight_cross', 0.3),
+                            w_embed=getattr(config, 'mv_weight_embed', 0.3),
+                        )
+                    else:
+                        difficulties = batch_calculate_difficulty(batch, config.expected_vad).to(device)
                     loss_contrastive = contrastive_criterion(embeddings_norm, labels, difficulties)
                 else:
                     loss_contrastive = contrastive_criterion(embeddings_norm, labels)
@@ -278,10 +301,22 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 pred_proto = proto_predictor(raw_embeddings)
                 loss_proto_pred = F.mse_loss(pred_proto, difficulties)
 
+            # Cross-modal alignment loss: train learned projections
+            loss_cross_modal = torch.tensor(0.0, device=device)
+            if modal_features is not None and hasattr(model, 'audio_cross_proj'):
+                audio_proj = F.normalize(modal_features['audio'], p=2, dim=1)
+                text_proj = F.normalize(modal_features['text'], p=2, dim=1)
+                loss_cross_modal = 1.0 - F.cosine_similarity(audio_proj, text_proj).mean()
+
             # Combined loss
             adv_weight = getattr(config, 'adversarial_weight', 0.0)
             proto_pred_weight = getattr(config, 'proto_predictor_weight', 0.0)
-            loss = loss_primary + config.contrastive_weight * loss_contrastive + adv_weight * loss_adversarial + proto_pred_weight * loss_proto_pred
+            cross_modal_weight = getattr(config, 'cross_modal_weight', 0.1)
+            loss = (loss_primary
+                    + effective_contrastive_weight * loss_contrastive
+                    + adv_weight * loss_adversarial
+                    + proto_pred_weight * loss_proto_pred
+                    + cross_modal_weight * loss_cross_modal)
 
         # Track losses (unscaled values)
         total_loss += loss.item()
@@ -331,6 +366,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         'contrastive_loss': avg_contrastive_loss,
         'adversarial_loss': avg_adversarial_loss,
         'proto_pred_loss': avg_proto_pred_loss,
+        'effective_contrastive_weight': effective_contrastive_weight,
         'global_step': global_step,
         **metrics
     }
@@ -501,6 +537,7 @@ def train(config, datasets=None):
         train_subset,
         batch_size=config.batch_size,
         shuffle=True,
+        drop_last=True,
         collate_fn=vad_collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -605,6 +642,13 @@ def train(config, datasets=None):
             separation_margin=getattr(config, 'separation_margin', 2.0),
             separation_weight=getattr(config, 'separation_weight', 0.5),
             alignment_weight=getattr(config, 'alignment_weight', 1.0),
+            use_adaptive_difficulty=getattr(config, 'use_adaptive_difficulty', False),
+            use_hard_negative_mining=getattr(config, 'use_hard_negative_mining', False),
+            hard_negative_weight=getattr(config, 'hard_negative_weight', 0.3),
+            use_memory_bank=getattr(config, 'use_memory_bank', False),
+            bank_size=int(getattr(config, 'bank_size', 64)),
+            bank_momentum=getattr(config, 'bank_momentum', 0.5),
+            bank_threshold=getattr(config, 'bank_threshold', 0.5),
         ).to(device)
         print(f"   Contrastive loss: {config.contrastive_loss_type}")
 
@@ -812,7 +856,7 @@ def train(config, datasets=None):
             train_metrics = train_epoch(
                 model, stage_loader, criterion, optimizer, device, config,
                 contrastive_criterion, domain_discriminator, domain_adv_loss,
-                proto_predictor, scaler, global_step
+                proto_predictor, scaler, global_step, current_epoch=global_epoch
             )
             global_step = train_metrics['global_step']
 
@@ -837,6 +881,7 @@ def train(config, datasets=None):
 
             if config.use_contrastive:
                 log_dict['train/contrastive_loss'] = train_metrics['contrastive_loss']
+                log_dict['train/contrastive_weight'] = train_metrics['effective_contrastive_weight']
 
             if domain_discriminator is not None:
                 log_dict['train/adversarial_loss'] = train_metrics['adversarial_loss']

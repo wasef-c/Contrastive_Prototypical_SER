@@ -85,127 +85,138 @@ template_config: &template
 
 
 experiments:
+#   # ============================================================
+#   # SECTION 1: contrastive_weight sensitivity
+#   # Default = 0.5 (already ran). Test 0.3, 0.7, 1.0
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_cw03"
+#     contrastive_weight: 0.3
+
+#   - <<: *template
+#     name: "SA_cw07"
+#     contrastive_weight: 0.7
+
+#   - <<: *template
+#     name: "SA_cw10"
+#     contrastive_weight: 1.0
+
+#   # ============================================================
+#   # SECTION 2: alpha sensitivity (prototypicality weight decay)
+#   # Default = 1.0. Higher = more focus on prototypical samples.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_alpha05"
+#     prototypical_alpha: 0.5
+
+#   - <<: *template
+#     name: "SA_alpha20"
+#     prototypical_alpha: 2.0
+
+#   - <<: *template
+#     name: "SA_alpha30"
+#     prototypical_alpha: 3.0
+
+#   # ============================================================
+#   # SECTION 3: beta sensitivity (margin scaling with difficulty)
+#   # Default = 0.5. Higher = more slack for atypical samples.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_beta02"
+#     prototypical_beta: 0.2
+
+#   - <<: *template
+#     name: "SA_beta10"
+#     prototypical_beta: 1.0
+
+#   # ============================================================
+#   # SECTION 4: margin_base sensitivity
+#   # Default = 0.1. Minimum distance to own prototype.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_mb005"
+#     margin_base: 0.05
+
+#   - <<: *template
+#     name: "SA_mb02"
+#     margin_base: 0.2
+
+#   # ============================================================
+#   # SECTION 5: separation_margin sensitivity
+#   # Default = 2.0. Min distance between class prototypes.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_sm10"
+#     separation_margin: 1.0
+
+#   - <<: *template
+#     name: "SA_sm30"
+#     separation_margin: 3.0
+
+#   # ============================================================
+#   # SECTION 6: separation_weight sensitivity
+#   # Default = 0.5. How much to weight the prototype separation term.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_sw025"
+#     separation_weight: 0.25
+
+#   - <<: *template
+#     name: "SA_sw10"
+#     separation_weight: 1.0
+
+#   # ============================================================
+#   # SECTION 7: temperature sensitivity
+#   # Default = 0.07. Lower = sharper similarity distribution.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_temp005"
+#     contrastive_temperature: 0.05
+
+#   - <<: *template
+#     name: "SA_temp010"
+#     contrastive_temperature: 0.10
+
+#   # ============================================================
+#   # SECTION 8: Proto-anchored + prototypical CE weighting
+#   # Adds difficulty-weighted CE on top of proto-anchored contrastive.
+#   # ============================================================
+
+#   - <<: *template
+#     name: "SA_protoweight_a10"
+#     use_prototypical_weighting: true
+#     prototypical_weighting_alpha: 1.0
+
+#   - <<: *template
+#     name: "SA_protoweight_a20"
+#     use_prototypical_weighting: true
+#     prototypical_weighting_alpha: 2.0
+
+#   - <<: *template
+#     name: "SA_protoweight_a30"
+#     use_prototypical_weighting: true
+#     prototypical_weighting_alpha: 3.0
+
   # ============================================================
-  # SECTION 1: contrastive_weight sensitivity
-  # Default = 0.5 (already ran). Test 0.3, 0.7, 1.0
+  # SECTION 9: batch_size=8 controls (to isolate batch size effect)
   # ============================================================
 
   - <<: *template
-    name: "SA_cw03"
-    contrastive_weight: 0.3
+    name: "SA_bs8_baseline"
+    use_contrastive: false
 
   - <<: *template
-    name: "SA_cw07"
-    contrastive_weight: 0.7
-
-  - <<: *template
-    name: "SA_cw10"
-    contrastive_weight: 1.0
+    name: "SA_bs8_default"
 
   # ============================================================
-  # SECTION 2: alpha sensitivity (prototypicality weight decay)
-  # Default = 1.0. Higher = more focus on prototypical samples.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_alpha05"
-    prototypical_alpha: 0.5
-
-  - <<: *template
-    name: "SA_alpha20"
-    prototypical_alpha: 2.0
-
-  - <<: *template
-    name: "SA_alpha30"
-    prototypical_alpha: 3.0
-
-  # ============================================================
-  # SECTION 3: beta sensitivity (margin scaling with difficulty)
-  # Default = 0.5. Higher = more slack for atypical samples.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_beta02"
-    prototypical_beta: 0.2
-
-  - <<: *template
-    name: "SA_beta10"
-    prototypical_beta: 1.0
-
-  # ============================================================
-  # SECTION 4: margin_base sensitivity
-  # Default = 0.1. Minimum distance to own prototype.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_mb005"
-    margin_base: 0.05
-
-  - <<: *template
-    name: "SA_mb02"
-    margin_base: 0.2
-
-  # ============================================================
-  # SECTION 5: separation_margin sensitivity
-  # Default = 2.0. Min distance between class prototypes.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_sm10"
-    separation_margin: 1.0
-
-  - <<: *template
-    name: "SA_sm30"
-    separation_margin: 3.0
-
-  # ============================================================
-  # SECTION 6: separation_weight sensitivity
-  # Default = 0.5. How much to weight the prototype separation term.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_sw025"
-    separation_weight: 0.25
-
-  - <<: *template
-    name: "SA_sw10"
-    separation_weight: 1.0
-
-  # ============================================================
-  # SECTION 7: temperature sensitivity
-  # Default = 0.07. Lower = sharper similarity distribution.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_temp005"
-    contrastive_temperature: 0.05
-
-  - <<: *template
-    name: "SA_temp010"
-    contrastive_temperature: 0.10
-
-  # ============================================================
-  # SECTION 8: Proto-anchored + prototypical CE weighting
-  # Adds difficulty-weighted CE on top of proto-anchored contrastive.
-  # ============================================================
-
-  - <<: *template
-    name: "SA_protoweight_a10"
-    use_prototypical_weighting: true
-    prototypical_weighting_alpha: 1.0
-
-  - <<: *template
-    name: "SA_protoweight_a20"
-    use_prototypical_weighting: true
-    prototypical_weighting_alpha: 2.0
-
-  - <<: *template
-    name: "SA_protoweight_a30"
-    use_prototypical_weighting: true
-    prototypical_weighting_alpha: 3.0
-
-  # ============================================================
-  # SECTION 9: unfrozen 6
+  # SECTION 10: unfrozen 6
   - <<: *template
     name: "Unfrozen_emotion2vec6"
     batch_size: 6

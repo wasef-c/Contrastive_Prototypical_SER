@@ -1,0 +1,143 @@
+# Enhanced Prototypicality Sweep
+# Memory bank + contrastive warm-up + learned cross-modal projection
+# 5 experiments x 1 seed = 5 runs
+# Run with: python runner.py --config configs/enhanced_proto_sweep.yaml --all
+#
+# VRAM budget: 24 GB
+
+template_config: &template
+  wandb_project: "Proto_multiview"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder — UF4
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 4
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT — UF4
+  unfreeze_bert_layers: 4
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 50
+  batch_size: 6
+  gradient_accumulation_steps: 20
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Contrastive defaults
+  use_contrastive: true
+  contrastive_loss_type: "prototype_anchored"
+  contrastive_weight: 0.5
+  contrastive_temperature: 0.07
+  contrastive_warmup_epochs: 5
+  projection_dim: 128
+  projection_hidden_dim: 512
+
+  # Proto-Anchored loss defaults
+  prototypical_alpha: 1.0
+  prototypical_beta: 0.5
+  margin_base: 0.1
+  separation_margin: 2.0
+  separation_weight: 0.5
+  use_adaptive_difficulty: false
+
+  # Multi-view ON (best previous config)
+  use_multiview_prototypicality: true
+  mv_weight_vad: 0.4
+  mv_weight_cross: 0.3
+  mv_weight_embed: 0.3
+
+  # Hard negative mining ON
+  use_hard_negative_mining: true
+  hard_negative_weight: 0.3
+
+  # Proto CE weighting ON
+  use_prototypical_weighting: true
+  prototypical_weighting_alpha: 2.0
+
+  # New features (off by default in template)
+  use_memory_bank: false
+  bank_size: 64
+  bank_momentum: 0.5
+  bank_threshold: 0.5
+
+  use_cross_modal_projection: false
+  cross_modal_dim: 256
+  cross_modal_weight: 0.1
+
+  # Off
+  use_two_stage_training: false
+  use_prototypical_label_smoothing: false
+  use_domain_adversarial: false
+  use_proto_predictor: false
+
+  # Dataset — MSPP only, 4 test sets
+  train_dataset: "MSPP"
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # MSPP-specific centroids (no test data leakage)
+  expected_vad:
+    0: [0.4895, 0.4885, 0.5267]
+    1: [0.6369, 0.6091, 0.6089]
+    2: [0.3567, 0.3964, 0.4427]
+    3: [0.2475, 0.7317, 0.7516]
+
+
+experiments:
+  # ============================================================
+  # 1. Best previous: multiview + hardneg + ceweight (reference)
+  # ============================================================
+  # - <<: *template
+  #   name: "enh_reference"
+
+  # ============================================================
+  # 2. + Memory bank
+  # ============================================================
+  - <<: *template
+    name: "enh_memory_bank"
+    use_memory_bank: true
+
+  # ============================================================
+  # 3. + Contrastive warm-up (longer ramp)
+  # ============================================================
+  - <<: *template
+    name: "enh_warmup"
+    contrastive_warmup_epochs: 10
+
+  # ============================================================
+  # 4. + Cross-modal projection
+  # ============================================================
+  - <<: *template
+    name: "enh_cross_modal_proj"
+    use_cross_modal_projection: true
+
+  # ============================================================
+  # 5. Full stack: memory bank + warmup + cross-modal projection
+  # ============================================================
+  - <<: *template
+    name: "enh_full_stack"
+    use_memory_bank: true
+    contrastive_warmup_epochs: 10
+    use_cross_modal_projection: true

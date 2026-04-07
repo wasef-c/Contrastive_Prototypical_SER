@@ -44,6 +44,8 @@ class EmotionClassifier(nn.Module):
         audio_model_name="facebook/wav2vec2-base-960h",
         unfreeze_audio_layers=0,
         emotion2vec_upstream_dir="/home/rml/Documents/pythontest/emotion2vec/upstream",
+        use_cross_modal_projection=False,
+        cross_modal_dim=256,
     ):
         super().__init__()
 
@@ -102,11 +104,17 @@ class EmotionClassifier(nn.Module):
         if use_projection_head:
             self.projection_head = nn.Sequential(
                 nn.Linear(hidden_dim, projection_hidden_dim),
-                nn.LayerNorm(projection_hidden_dim),
+                nn.BatchNorm1d(projection_hidden_dim),
                 nn.ReLU(),
                 nn.Linear(projection_hidden_dim, projection_dim),
             )
             print(f"   Projection head: {hidden_dim} -> {projection_hidden_dim} -> {projection_dim}")
+
+        # Cross-modal projection: learned mapping to shared space for agreement signal
+        if use_cross_modal_projection and modality == "both" and use_projection_head:
+            self.audio_cross_proj = nn.Linear(audio_dim, cross_modal_dim)
+            self.text_cross_proj = nn.Linear(768, cross_modal_dim)  # BERT output is always 768
+            print(f"   Cross-modal projection: {audio_dim}/{768} -> {cross_modal_dim}")
 
     def _build_audio_only(self):
         """Audio-only: [batch, audio_dim] -> [batch, 1024] -> [batch, output_dim]"""
@@ -207,7 +215,7 @@ class EmotionClassifier(nn.Module):
 
         if return_embeddings:
             projected = self._project(embeddings)
-            return logits, projected, embeddings
+            return logits, projected, embeddings, None
         return logits
 
     def _forward_text(self, text_input_ids, text_attention_mask, return_embeddings=False):
@@ -221,7 +229,7 @@ class EmotionClassifier(nn.Module):
 
         if return_embeddings:
             projected = self._project(embeddings)
-            return logits, projected, embeddings
+            return logits, projected, embeddings, None
         return logits
 
     def _forward_multimodal(self, audio_features, text_input_ids, text_attention_mask, return_embeddings=False):
@@ -238,7 +246,19 @@ class EmotionClassifier(nn.Module):
 
         if return_embeddings:
             projected = self._project(embeddings)
-            return logits, projected, embeddings
+            if hasattr(self, 'audio_cross_proj'):
+                # Learned cross-modal projection: detach source features so only
+                # the projection layers get gradients from cross-modal alignment loss
+                modal_features = {
+                    'audio': self.audio_cross_proj(audio_features.detach()),  # [B, cross_modal_dim]
+                    'text': self.text_cross_proj(text_features.detach()),     # [B, cross_modal_dim]
+                }
+            else:
+                modal_features = {
+                    'audio': audio_features.detach(),  # [B, 768]
+                    'text': text_features.detach(),     # [B, 768]
+                }
+            return logits, projected, embeddings, modal_features
         return logits
 
 
@@ -281,4 +301,6 @@ def create_model(config):
             'emotion2vec_upstream_dir',
             '/home/rml/Documents/pythontest/emotion2vec/upstream'
         ),
+        use_cross_modal_projection=cfg.get('use_cross_modal_projection', False),
+        cross_modal_dim=cfg.get('cross_modal_dim', 256),
     )

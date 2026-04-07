@@ -157,7 +157,7 @@ def print_yaml_format(centroids, name="expected_vad"):
         # Map label to emotion name (assuming standard 4-class setup)
         emotion_names = {0: 'neutral', 1: 'happy', 2: 'sad', 3: 'anger'}
         emotion = emotion_names.get(label, f'class_{label}')
-        print(f"  {label}: [{v:.4f}, {a:.4f}, {a:.4f}]  # {emotion}")
+        print(f"  {label}: [{v:.4f}, {a:.4f}, {d:.4f}]  # {emotion}")
 
 
 if __name__ == "__main__":

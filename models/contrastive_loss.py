@@ -244,6 +244,13 @@ class PrototypeAnchoredLoss(nn.Module):
         separation_margin=2.0,
         separation_weight=0.5,
         learnable_prototypes=True,
+        use_adaptive_difficulty=False,
+        use_hard_negative_mining=False,
+        hard_negative_weight=0.3,
+        use_memory_bank=False,
+        bank_size=64,
+        bank_momentum=0.5,
+        bank_threshold=0.5,
     ):
         """
         Args:
@@ -256,6 +263,17 @@ class PrototypeAnchoredLoss(nn.Module):
             separation_margin: minimum distance between class prototypes
             separation_weight: weight for prototype separation loss
             learnable_prototypes: if True, prototypes are updated via gradient descent
+            use_adaptive_difficulty: if True, compute difficulty from embedding-space
+                distances to learned prototypes instead of fixed VAD centroids.
+            use_hard_negative_mining: if True, add prototypicality-weighted repulsion
+                from wrong-class prototypes. Prototypical samples near wrong prototypes
+                get stronger repulsion (informative negatives).
+            hard_negative_weight: weight for hard negative mining loss term
+            use_memory_bank: if True, maintain per-class FIFO queue of prototypical
+                embeddings and blend with learnable prototypes
+            bank_size: number of embeddings per class in memory bank
+            bank_momentum: blend factor (1.0 = all learnable, 0.0 = all bank centroid)
+            bank_threshold: only store embeddings with difficulty < threshold
         """
         super().__init__()
         self.alpha = alpha
@@ -265,6 +283,13 @@ class PrototypeAnchoredLoss(nn.Module):
         self.separation_weight = separation_weight
         self.num_classes = num_classes
         self.embedding_dim = embedding_dim
+        self.use_adaptive_difficulty = use_adaptive_difficulty
+        self.use_hard_negative_mining = use_hard_negative_mining
+        self.hard_negative_weight = hard_negative_weight
+        self.use_memory_bank = use_memory_bank
+        self.bank_size = bank_size
+        self.bank_momentum = bank_momentum
+        self.bank_threshold = bank_threshold
 
         # Initialize prototypes
         # We can't directly map 3D VAD to embedding_dim, but we can use VAD structure
@@ -275,8 +300,20 @@ class PrototypeAnchoredLoss(nn.Module):
         else:
             self.register_buffer('prototypes', init_prototypes)
 
+        # Memory bank: per-class FIFO queue of prototypical embeddings
+        if use_memory_bank:
+            self.register_buffer('memory_bank', torch.zeros(num_classes, bank_size, embedding_dim))
+            self.register_buffer('bank_ptr', torch.zeros(num_classes, dtype=torch.long))
+            self.register_buffer('bank_filled', torch.zeros(num_classes, dtype=torch.bool))
+
         print(f"   PrototypeAnchoredLoss: {num_classes} prototypes in {embedding_dim}D")
         print(f"   alpha={alpha}, beta={beta}, margin_base={margin_base}")
+        if use_adaptive_difficulty:
+            print(f"   Adaptive difficulty: ON (embedding-space distances)")
+        if use_hard_negative_mining:
+            print(f"   Hard negative mining: ON (weight={hard_negative_weight})")
+        if use_memory_bank:
+            print(f"   Memory bank: ON (size={bank_size}, momentum={bank_momentum}, threshold={bank_threshold})")
 
     def _init_from_vad(self, expected_vad, embedding_dim, num_classes):
         """
@@ -305,7 +342,8 @@ class PrototypeAnchoredLoss(nn.Module):
         Args:
             embeddings: [batch_size, embedding_dim] - L2 normalized projected embeddings
             labels: [batch_size] - class labels (0 to num_classes-1)
-            difficulties: [batch_size] - prototypicality scores (VAD distance)
+            difficulties: [batch_size] - prototypicality scores (VAD distance).
+                          Ignored when use_adaptive_difficulty=True.
 
         Returns:
             loss: scalar
@@ -316,11 +354,36 @@ class PrototypeAnchoredLoss(nn.Module):
         # Normalize prototypes (keep on unit sphere)
         prototypes_norm = F.normalize(self.prototypes, p=2, dim=1)  # [num_classes, embed_dim]
 
+        # Memory bank: blend learnable prototypes with bank centroids
+        if self.use_memory_bank and self.bank_filled.any():
+            # Clone buffers to avoid in-place modification conflicts with autograd
+            bank_snapshot = self.memory_bank.clone().detach()
+            filled_snapshot = self.bank_filled.clone().detach()
+            bank_centroids = bank_snapshot.mean(dim=1)  # [C, D]
+            bank_centroids = F.normalize(bank_centroids, p=2, dim=1)
+            # Blend: momentum * learnable + (1 - momentum) * bank centroid
+            blended = self.bank_momentum * prototypes_norm + (1 - self.bank_momentum) * bank_centroids
+            # Only blend for classes that have bank entries
+            prototypes_norm = torch.where(
+                filled_snapshot.unsqueeze(1).expand_as(prototypes_norm),
+                F.normalize(blended, p=2, dim=1),
+                prototypes_norm,
+            )
+
         # Get each sample's class prototype
         class_prototypes = prototypes_norm[labels]  # [batch_size, embed_dim]
 
         # Compute squared distances to own class prototype
         distances_sq = ((embeddings - class_prototypes) ** 2).sum(dim=1)  # [batch_size]
+
+        if self.use_adaptive_difficulty:
+            # Adaptive: difficulty = distance to learned prototype in embedding space.
+            # Detached so weights/margins don't backprop through the distance
+            # (prevents degenerate solutions where model collapses all distances).
+            # Normalized to [0, 1] range per batch for stable weighting.
+            adaptive_diff = distances_sq.detach().sqrt()
+            adaptive_diff = adaptive_diff / (adaptive_diff.max() + 1e-8)
+            difficulties = adaptive_diff
 
         # Prototypicality-based weights: prototypical samples → high weight
         weights = torch.exp(-self.alpha * difficulties)
@@ -340,7 +403,39 @@ class PrototypeAnchoredLoss(nn.Module):
                 # Hinge: penalize if prototypes are too close
                 L_separation = L_separation + F.relu(self.separation_margin - dist_sq)
 
-        loss = L_anchor + self.separation_weight * L_separation
+        # Hard negative mining: prototypicality-weighted repulsion from wrong prototypes
+        L_hard_neg = torch.tensor(0.0, device=device)
+        if self.use_hard_negative_mining:
+            # Distance to ALL prototypes: [B, C]
+            all_dist_sq = torch.cdist(embeddings, prototypes_norm).pow(2)
+
+            # Mask out correct class (only repel from wrong prototypes)
+            wrong_mask = torch.ones(batch_size, self.num_classes, device=device)
+            wrong_mask.scatter_(1, labels.unsqueeze(1), 0)
+
+            # Hinge: penalize if too close to wrong prototypes
+            repulsion = F.relu(self.separation_margin - all_dist_sq) * wrong_mask  # [B, C]
+
+            # Weight by prototypicality: prototypical samples get stronger repulsion
+            # (they're informative negatives), atypical samples get weaker (noisy)
+            weighted_repulsion = weights.unsqueeze(1) * repulsion  # [B, C]
+            L_hard_neg = weighted_repulsion.sum(dim=1).mean()
+
+        # Update memory bank with prototypical samples from this batch
+        if self.use_memory_bank:
+            with torch.no_grad():
+                proto_mask = difficulties < self.bank_threshold
+                for c in range(self.num_classes):
+                    class_mask = (labels == c) & proto_mask
+                    if class_mask.sum() > 0:
+                        class_embeds = embeddings[class_mask].detach()
+                        for emb in class_embeds:
+                            ptr = self.bank_ptr[c].long()
+                            self.memory_bank[c, ptr] = emb
+                            self.bank_ptr[c] = (ptr + 1) % self.bank_size
+                        self.bank_filled[c] = True
+
+        loss = L_anchor + self.separation_weight * L_separation + self.hard_negative_weight * L_hard_neg
         return loss
 
 
@@ -575,6 +670,13 @@ def create_contrastive_loss(loss_type, **kwargs):
             margin_base=kwargs.get('margin_base', 0.1),
             separation_margin=kwargs.get('separation_margin', 2.0),
             separation_weight=kwargs.get('separation_weight', 0.5),
+            use_adaptive_difficulty=kwargs.get('use_adaptive_difficulty', False),
+            use_hard_negative_mining=kwargs.get('use_hard_negative_mining', False),
+            hard_negative_weight=kwargs.get('hard_negative_weight', 0.3),
+            use_memory_bank=kwargs.get('use_memory_bank', False),
+            bank_size=kwargs.get('bank_size', 64),
+            bank_momentum=kwargs.get('bank_momentum', 0.5),
+            bank_threshold=kwargs.get('bank_threshold', 0.5),
         )
 
     elif loss_type == "prototype_anchored_multiDS":
