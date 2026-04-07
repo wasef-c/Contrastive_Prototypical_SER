@@ -3,10 +3,10 @@
 # 5 experiments x 1 seed = 5 runs
 # Run with: python runner.py --config configs/enhanced_proto_sweep.yaml --all
 #
-# VRAM budget: 24 GB
+# VRAM budget: 48 GB (A40)
 
 template_config: &template
-  wandb_project: "Proto_multiview"
+  wandb_project: "Proto_multiview_Big"
   seeds: [42]
 
   # Task
@@ -39,8 +39,8 @@ template_config: &template
 
   # Training
   num_epochs: 50
-  batch_size: 6
-  gradient_accumulation_steps: 20
+  batch_size: 64
+  gradient_accumulation_steps: 1
   learning_rate: 5e-6
   weight_decay: 1e-4
   val_split: 0.1
@@ -109,8 +109,18 @@ experiments:
   # ============================================================
   # 1. Best previous: multiview + hardneg + ceweight (reference)
   # ============================================================
-  # - <<: *template
-  #   name: "enh_reference"
+  
+  - <<: *template
+    name: "baseline"
+    use_contrastive: false
+    use_prototypical_weighting: false
+    use_hard_negative_mining: false
+    use_multiview_prototypicality: false
+
+
+
+  - <<: *template
+    name: "enh_reference"
 
   # ============================================================
   # 2. + Memory bank
