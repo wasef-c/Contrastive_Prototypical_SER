@@ -529,6 +529,8 @@ def train(config, datasets=None):
 
     # Create dataloaders
     num_workers = getattr(config, 'num_workers', 2)
+    eval_batch_size = getattr(config, 'eval_batch_size', None) or config.batch_size
+    eval_batch_size = int(eval_batch_size)
     pin_memory = device.type == 'cuda'
     persistent = num_workers > 0
     prefetch = 2 if num_workers > 0 else None
@@ -546,7 +548,7 @@ def train(config, datasets=None):
     )
     val_loader = DataLoader(
         val_subset,
-        batch_size=config.batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         collate_fn=vad_collate_fn,
         num_workers=num_workers,
@@ -559,7 +561,7 @@ def train(config, datasets=None):
     for test_dataset in test_datasets:
         test_loader = DataLoader(
             test_dataset,
-            batch_size=config.batch_size,
+            batch_size=eval_batch_size,
             shuffle=False,
             collate_fn=vad_collate_fn,
             num_workers=num_workers,

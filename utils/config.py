@@ -52,6 +52,7 @@ class Config:
         self.learning_rate = 5e-6
         self.weight_decay = 5e-6
         self.dropout = 0.1
+        self.eval_batch_size = None  # defaults to batch_size if not set
 
         # Prototypicality
         self.expected_vad = DEFAULT_EXPECTED_VAD.copy()

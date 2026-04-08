@@ -38,8 +38,9 @@ template_config: &template
   num_attention_heads: 8
 
   # Training
-  num_epochs: 50
+  num_epochs: 20
   batch_size: 96
+  eval_batch_size: 32
   gradient_accumulation_steps: 1
   num_workers: 8
   learning_rate: 5e-6
