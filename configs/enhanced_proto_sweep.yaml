@@ -39,8 +39,9 @@ template_config: &template
 
   # Training
   num_epochs: 50
-  batch_size: 64
+  batch_size: 96
   gradient_accumulation_steps: 1
+  num_workers: 8
   learning_rate: 5e-6
   weight_decay: 1e-4
   val_split: 0.1
