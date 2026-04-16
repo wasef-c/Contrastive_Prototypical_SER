@@ -172,7 +172,8 @@ class EmotionClassifier(nn.Module):
         )
 
     def forward(self, audio_features=None, text_input_ids=None, text_attention_mask=None,
-                audio_waveforms=None, audio_attention_mask=None, return_embeddings=False):
+                audio_waveforms=None, audio_attention_mask=None, return_embeddings=False,
+                detach_modal_features=True):
         """
         Forward pass with optional embedding extraction
 
@@ -197,7 +198,8 @@ class EmotionClassifier(nn.Module):
         elif self.modality == "text":
             return self._forward_text(text_input_ids, text_attention_mask, return_embeddings)
         elif self.modality == "both":
-            return self._forward_multimodal(audio_features, text_input_ids, text_attention_mask, return_embeddings)
+            return self._forward_multimodal(audio_features, text_input_ids, text_attention_mask,
+                                            return_embeddings, detach_modal_features=detach_modal_features)
 
     def _project(self, embeddings):
         """Project embeddings through projection head for contrastive learning"""
@@ -232,7 +234,8 @@ class EmotionClassifier(nn.Module):
             return logits, projected, embeddings, None
         return logits
 
-    def _forward_multimodal(self, audio_features, text_input_ids, text_attention_mask, return_embeddings=False):
+    def _forward_multimodal(self, audio_features, text_input_ids, text_attention_mask,
+                             return_embeddings=False, detach_modal_features=True):
         """Multimodal forward pass"""
         if audio_features is None:
             raise ValueError("audio_features required for multimodal mode")
@@ -253,10 +256,16 @@ class EmotionClassifier(nn.Module):
                     'audio': self.audio_cross_proj(audio_features.detach()),  # [B, cross_modal_dim]
                     'text': self.text_cross_proj(text_features.detach()),     # [B, cross_modal_dim]
                 }
-            else:
+            elif detach_modal_features:
                 modal_features = {
                     'audio': audio_features.detach(),  # [B, 768]
                     'text': text_features.detach(),     # [B, 768]
+                }
+            else:
+                # Keep gradients flowing back into encoders (for domain adversarial training)
+                modal_features = {
+                    'audio': audio_features,  # [B, 768]
+                    'text': text_features,     # [B, 768]
                 }
             return logits, projected, embeddings, modal_features
         return logits

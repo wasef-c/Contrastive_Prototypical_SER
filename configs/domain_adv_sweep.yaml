@@ -1,0 +1,137 @@
+# Domain Adversarial v2 Sweep
+# Multi-corpus (MSPP+IEMO+MSPI) -> test on CMUMOSEI, SAMSEMO
+# Novel feature: modality-level GRL (pre-fusion per-modality discriminators)
+# Combined with prototypicality weighting
+# 5 experiments x 1 seed = 5 runs
+# Run with: python runner.py --config configs/domain_adv_sweep.yaml --all
+#
+# VRAM budget: ~80 GB (A100)
+
+template_config: &template
+  wandb_project: "DomainAdv_v2"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Emotion2Vec encoder — UF4
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 4
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 30
+
+  # BERT — UF4
+  unfreeze_bert_layers: 4
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 10
+  batch_size: 10
+  eval_batch_size: 10
+  gradient_accumulation_steps: 16
+  num_workers: 8
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 5
+
+  # Contrastive OFF (pure domain adversarial study)
+  use_contrastive: false
+
+  # Domain adversarial defaults (overridden per-experiment)
+  use_domain_adversarial: false
+  use_modality_adversarial: false
+  adversarial_weight: 0.1
+  modality_adv_weight: 0.1
+  adversarial_alpha: 2.0
+  adversarial_hidden_dim: 256
+  use_prototypical_adversarial: false
+
+  # GRL scheduling
+  adversarial_peak_lambda: 1.0
+  adversarial_warmup_frac: 0.5
+
+  # Off
+  use_multiview_prototypicality: false
+  use_hard_negative_mining: false
+  use_prototypical_weighting: false
+  use_memory_bank: false
+  use_cross_modal_projection: false
+  use_two_stage_training: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  # Dataset — multi-corpus training, test on held-out corpora
+  train_dataset: ["MSPP", "IEMO", "MSPI"]
+  test_datasets: ["CMUMOSEI", "SAMSEMO"]
+
+  # MSPP-specific centroids (matches largest training corpus; all 3 train corpora
+  # use same 4-class mapping so one set of centroids suffices for difficulty calc)
+  expected_vad:
+    0: [0.4895, 0.4885, 0.5267]
+    1: [0.6369, 0.6091, 0.6089]
+    2: [0.3567, 0.3964, 0.4427]
+    3: [0.2475, 0.7317, 0.7516]
+
+
+experiments:
+  # ============================================================
+  # 1. Baseline: multi-corpus training, no adversarial
+  # ============================================================
+  # - <<: *template
+  #   name: "da_baseline"
+
+  # # ============================================================
+  # # 2. Embedding-level adversarial (standard DANN on fused embeddings)
+  # # ============================================================
+  # - <<: *template
+  #   name: "da_embedding"
+  #   use_domain_adversarial: true
+  #   adversarial_weight: 0.1
+
+  # ============================================================
+  # 3. Modality-level adversarial (novel: per-modality GRL pre-fusion)
+  # ============================================================
+  # - <<: *template
+  #   name: "da_modality"
+  #   use_modality_adversarial: true
+  #   modality_adv_weight: 0.1
+
+  # ============================================================
+  # 4. Modality-level + prototypicality weighting
+  # ============================================================
+  - <<: *template
+    name: "da_proto_weighted"
+    use_modality_adversarial: true
+    modality_adv_weight: 0.1
+    use_prototypical_adversarial: true
+    adversarial_alpha: 2.0
+
+  # ============================================================
+  # 5. Full stack: embedding + modality + proto-weighted + longer warmup
+  # ============================================================
+  - <<: *template
+    name: "da_full"
+    use_domain_adversarial: true
+    use_modality_adversarial: true
+    adversarial_weight: 0.1
+    modality_adv_weight: 0.1
+    use_prototypical_adversarial: true
+    adversarial_alpha: 2.0
+    adversarial_warmup_frac: 0.7
+    adversarial_peak_lambda: 1.0

@@ -85,6 +85,58 @@ class DomainDiscriminator(nn.Module):
         return self.classifier(reversed_embeddings)
 
 
+class ModalityDomainDiscriminator(nn.Module):
+    """
+    Per-modality domain discriminator applied to PRE-FUSION features.
+
+    Each modality (audio, text) has its own GRL + classifier head predicting
+    the source corpus. Forces each encoder to produce corpus-invariant
+    representations INDEPENDENTLY, before fusion gets a chance to mask
+    modality-specific corpus signatures.
+
+    Novel angle: previous domain adversarial work applies GRL to fused/shared
+    embeddings, which may hide corpus-specific features that only exist in one
+    modality (e.g. microphone characteristics in audio, scripted language in text).
+    """
+
+    def __init__(self, audio_dim=768, text_dim=768, hidden_dim=256, num_domains=3):
+        super().__init__()
+        self.audio_grl = GradientReversalLayer()
+        self.text_grl = GradientReversalLayer()
+
+        self.audio_classifier = nn.Sequential(
+            nn.Linear(audio_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, num_domains),
+        )
+        self.text_classifier = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, num_domains),
+        )
+
+    def set_lambda(self, lambda_val):
+        """Update GRL lambda for both modalities (typically scheduled during training)."""
+        self.audio_grl.set_lambda(lambda_val)
+        self.text_grl.set_lambda(lambda_val)
+
+    def forward(self, audio_features, text_features):
+        """
+        Args:
+            audio_features: [B, audio_dim] - pre-fusion audio features (WITH gradient)
+            text_features: [B, text_dim] - pre-fusion text features (WITH gradient)
+
+        Returns:
+            audio_domain_logits: [B, num_domains]
+            text_domain_logits: [B, num_domains]
+        """
+        audio_reversed = self.audio_grl(audio_features)
+        text_reversed = self.text_grl(text_features)
+        return self.audio_classifier(audio_reversed), self.text_classifier(text_reversed)
+
+
 class PrototypicalDomainAdversarialLoss(nn.Module):
     """
     Domain adversarial loss weighted by prototypicality.

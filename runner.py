@@ -8,63 +8,147 @@ import numpy as np
 import wandb
 import argparse
 
+from typing import Any, Dict, List, Tuple
+
 from utils.config import Config
-from data.dataset import create_datasets
-from train import train
+from data.dataset import EmotionDataset, MultiCorpusDataset
+from train import train, is_run_finished, load_finished_results
 
 
-def _dataset_cache_key(config):
-    """
-    Compute a cache key for dataset loading.
-    Experiments with the same key can share loaded datasets.
-    """
-    train_ds = config.train_dataset
-    if isinstance(train_ds, list):
-        train_ds = tuple(sorted(train_ds))
-    else:
-        train_ds = (train_ds,)
-
-    test_ds = tuple(sorted(getattr(config, 'test_datasets', [])))
+def _needs_raw_audio(config) -> bool:
+    """True when experiment requires raw waveforms (unfrozen audio encoder)."""
     audio_type = getattr(config, 'audio_encoder_type', 'preextracted')
-    modality = getattr(config, 'modality', 'both')
-    task_type = getattr(config, 'task_type', 'classification')
-
-    # Frozen vs unfrozen encoders can't share datasets: frozen experiments
-    # cache features (destroying raw audio), unfrozen need raw waveforms.
     unfreeze = getattr(config, 'unfreeze_audio_layers', 0)
-    needs_raw_audio = (audio_type in ('wav2vec2', 'emotion2vec')) and unfreeze > 0
-
-    return (train_ds, test_ds, audio_type, modality, task_type, needs_raw_audio)
+    return (audio_type in ('wav2vec2', 'emotion2vec')) and unfreeze > 0
 
 
-def preload_datasets(yaml_path):
+def _corpus_key(corpus_name: str, config) -> Tuple[Any, ...]:
     """
-    Pre-load all unique dataset combinations needed across experiments.
-    Returns a dict mapping cache_key -> (train_dataset, test_datasets).
+    Cache key for a single corpus instance. Two experiments that resolve to the
+    same key can share one EmotionDataset object.
+
+    Includes audio_model_name and needs_raw_audio because frozen experiments
+    mutate the dataset via cache_encoder_features (which bakes in model-specific
+    features and frees raw audio), so those variants cannot be shared with
+    experiments that need raw waveforms or a different encoder.
+    """
+    return (
+        corpus_name,
+        getattr(config, 'audio_encoder_type', 'preextracted'),
+        getattr(config, 'audio_model_name', None),
+        getattr(config, 'modality', 'both'),
+        getattr(config, 'task_type', 'classification'),
+        _needs_raw_audio(config),
+    )
+
+
+def _resolve_train_names(config) -> List[str]:
+    names = config.train_dataset
+    if isinstance(names, str):
+        names = [names]
+    return list(names)
+
+
+def _resolve_test_names(config, train_names: List[str]) -> List[str]:
+    """Mirror the test-name resolution logic from data.dataset.create_datasets."""
+    task_type = getattr(config, 'task_type', 'classification')
+    test_names = list(getattr(config, 'test_datasets', []) or [])
+
+    if not test_names:
+        test_names = [d for d in EmotionDataset.DATASET_MAP.keys() if d not in train_names]
+
+    test_names = [d for d in test_names if d not in train_names]
+
+    if task_type == "regression":
+        test_names = [d for d in test_names if d in EmotionDataset.DATASETS_WITH_VAD]
+
+    return test_names
+
+
+def _get_or_load_corpus(
+    corpus_name: str,
+    config,
+    corpus_cache: Dict[Tuple[Any, ...], EmotionDataset],
+) -> EmotionDataset:
+    """Return a cached EmotionDataset for this corpus/config, loading on miss."""
+    key = _corpus_key(corpus_name, config)
+    ds = corpus_cache.get(key)
+    if ds is None:
+        ds = EmotionDataset(
+            corpus_name,
+            split="train",
+            config=config,
+            task_type=getattr(config, 'task_type', 'classification'),
+        )
+        corpus_cache[key] = ds
+    return ds
+
+
+def build_datasets_from_cache(
+    config,
+    corpus_cache: Dict[Tuple[Any, ...], EmotionDataset],
+) -> Tuple[Any, List[EmotionDataset]]:
+    """
+    Compose (train_dataset, test_datasets) for an experiment, reusing any
+    already-loaded corpora from corpus_cache. Populates the cache on miss.
+    """
+    train_names = _resolve_train_names(config)
+    test_names = _resolve_test_names(config, train_names)
+
+    train_list = [_get_or_load_corpus(n, config, corpus_cache) for n in train_names]
+    if len(train_list) == 1:
+        train_dataset = train_list[0]
+    else:
+        train_dataset = MultiCorpusDataset(train_list)
+
+    test_datasets = [_get_or_load_corpus(n, config, corpus_cache) for n in test_names]
+
+    print(f"  Training: {train_dataset.dataset_name} -> {test_names}")
+    return train_dataset, test_datasets
+
+
+def preload_datasets(yaml_path) -> Dict[Tuple[Any, ...], EmotionDataset]:
+    """
+    Walk every experiment and pre-load each unique corpus exactly once.
+    Returns a per-corpus cache keyed by _corpus_key(name, config).
     """
     experiments = Config.list_experiments(yaml_path)
     if experiments is None:
         return {}
 
-    # Find unique dataset configs
-    seen_keys = {}
+    # Collect the union of required corpora across all experiments.
+    required: Dict[Tuple[Any, ...], Tuple[str, Any]] = {}
     for exp in experiments:
         config = Config.from_yaml(yaml_path, experiment_id=exp['index'])
-        key = _dataset_cache_key(config)
-        if key not in seen_keys:
-            seen_keys[key] = config
+        train_names = _resolve_train_names(config)
+        test_names = _resolve_test_names(config, train_names)
+        for name in list(train_names) + list(test_names):
+            key = _corpus_key(name, config)
+            if key not in required:
+                required[key] = (name, config)
 
-    print(f"  Pre-loading {len(seen_keys)} unique dataset configurations...")
-    cache = {}
-    for i, (key, config) in enumerate(seen_keys.items()):
-        train_ds_name = config.train_dataset if isinstance(config.train_dataset, str) else "+".join(config.train_dataset)
+    print(f"  Pre-loading {len(required)} unique corpus instances...")
+    corpus_cache: Dict[Tuple[Any, ...], EmotionDataset] = {}
+    for i, (key, (name, config)) in enumerate(required.items()):
         audio_type = getattr(config, 'audio_encoder_type', 'preextracted')
-        print(f"\n  [{i+1}/{len(seen_keys)}] Loading: train={train_ds_name}, audio={audio_type}")
-        datasets = create_datasets(config)
-        cache[key] = datasets
+        print(f"\n  [{i+1}/{len(required)}] Loading corpus: {name} (audio={audio_type}, raw={_needs_raw_audio(config)})")
+        corpus_cache[key] = EmotionDataset(
+            name,
+            split="train",
+            config=config,
+            task_type=getattr(config, 'task_type', 'classification'),
+        )
 
-    print(f"\n  All datasets pre-loaded.\n")
-    return cache
+    print(f"\n  All corpora pre-loaded.\n")
+    return corpus_cache
+
+
+def _run_or_load(config, datasets):
+    """Run train() or load cached results if this run is already finished."""
+    if is_run_finished(config):
+        print(f"  Run already finished: {config.experiment_name}_seed{config.seed} — loading cached results")
+        return load_finished_results(config)
+    return train(config, datasets=datasets)
 
 
 def run_with_seeds(config, datasets=None):
@@ -79,7 +163,7 @@ def run_with_seeds(config, datasets=None):
 
     if len(seeds) == 1:
         config.seed = seeds[0]
-        return train(config, datasets=datasets)
+        return _run_or_load(config, datasets)
 
     # Multi-seed experiment
     print(f"\n{'='*60}")
@@ -98,7 +182,7 @@ def run_with_seeds(config, datasets=None):
         config.seed = int(seed)
         config.experiment_name = f"{original_exp_name}_seed{seed}"
 
-        result = train(config, datasets=datasets)
+        result = _run_or_load(config, datasets)
         all_results.append(result)
 
     # Compute and log averaged results
@@ -283,8 +367,8 @@ def run_all_experiments(yaml_path):
     if experiments is None:
         raise ValueError("YAML file doesn't contain multiple experiments")
 
-    # Pre-load all datasets once
-    dataset_cache = preload_datasets(yaml_path)
+    # Pre-load every unique corpus once; experiments compose train/test from this cache.
+    corpus_cache = preload_datasets(yaml_path)
 
     print(f"Running {len(experiments)} experiments from {yaml_path}")
     results = []
@@ -299,9 +383,8 @@ def run_all_experiments(yaml_path):
         try:
             config = Config.from_yaml(yaml_path, experiment_id=exp_idx)
 
-            # Look up cached datasets
-            key = _dataset_cache_key(config)
-            datasets = dataset_cache.get(key)
+            # Compose this experiment's train/test bundle from the per-corpus cache.
+            datasets = build_datasets_from_cache(config, corpus_cache)
 
             result = run_with_seeds(config, datasets=datasets)
             results.append({

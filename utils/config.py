@@ -103,6 +103,16 @@ class Config:
         # Prototypicality-weighted primary loss
         self.use_prototypical_weighting = False
         self.prototypical_weighting_alpha = 2.0  # exp(-alpha * difficulty)
+        # Source of difficulty for CE weighting: "vad" | "agreement" | "both"
+        self.ce_weight_source = "vad"
+        self.ce_weight_both_vad_w = 0.5  # blend weight for "both" (agreement gets 1-w)
+        # If True, up-weight atypical samples: exp(+alpha*diff) instead of exp(-alpha*diff)
+        self.ce_weight_invert = False
+        # Learnable VAD centroids
+        self.use_learned_centroids = False
+        self.learned_centroid_mode = "ema"  # "ema" | "grad"
+        self.learned_centroid_momentum = 0.9  # EMA momentum (higher = slower update)
+        self.learned_centroid_lr = 1e-3  # LR for grad-mode centroid params
         self.use_prototypical_label_smoothing = False
         self.label_smoothing_beta = 0.5  # smoothing = beta * difficulty
         self.label_smoothing_max = 0.6  # cap smoothing to avoid total flattening
@@ -118,6 +128,14 @@ class Config:
         self.adversarial_alpha = 2.0  # Prototypicality weight decay for adversarial
         self.adversarial_hidden_dim = 256  # Hidden dim of domain discriminator
         self.use_prototypical_adversarial = True  # Weight adversarial by prototypicality
+
+        # Modality-level domain adversarial (applies GRL to audio/text pre-fusion)
+        self.use_modality_adversarial = False
+        self.modality_adv_weight = 0.1  # Weight for per-modality adversarial loss
+
+        # Adversarial GRL scheduling
+        self.adversarial_peak_lambda = 1.0  # Peak lambda value after warmup
+        self.adversarial_warmup_frac = 0.5  # Fraction of training used to ramp lambda to peak
 
         # Two-stage prototypicality training
         self.use_two_stage_training = False
@@ -152,6 +170,7 @@ class Config:
             'early_stopping_patience',
             'adversarial_weight', 'adversarial_alpha', 'adversarial_hidden_dim',
             'prototypical_weighting_alpha', 'label_smoothing_beta', 'label_smoothing_max',
+            'ce_weight_both_vad_w', 'learned_centroid_momentum', 'learned_centroid_lr',
             'proto_predictor_weight', 'proto_predictor_hidden_dim',
             'unfreeze_bert_layers', 'bert_learning_rate',
             'unfreeze_audio_layers', 'audio_learning_rate',
@@ -161,6 +180,7 @@ class Config:
             'hard_negative_weight',
             'bank_size', 'bank_momentum', 'bank_threshold',
             'cross_modal_dim', 'cross_modal_weight',
+            'modality_adv_weight', 'adversarial_peak_lambda', 'adversarial_warmup_frac',
         ]
 
         for field in numeric_fields:

@@ -17,17 +17,23 @@ import random
 import wandb
 from pathlib import Path
 import argparse
+import json
+import os
 
 from utils.config import Config
 from data.dataset import create_datasets
 from data.collate import vad_collate_fn
 from models.classifier import create_model
 from models.contrastive_loss import create_contrastive_loss
-from models.domain_adversarial import DomainDiscriminator, PrototypicalDomainAdversarialLoss
+from models.domain_adversarial import (
+    DomainDiscriminator,
+    ModalityDomainDiscriminator,
+    PrototypicalDomainAdversarialLoss,
+)
 from models.prototypicality_predictor import PrototypicalityPredictor
 from utils.metrics import calculate_classification_metrics, calculate_vad_metrics
-from utils.prototypicality import batch_calculate_difficulty, calculate_difficulty
-from utils.multiview_prototypicality import compute_multiview_difficulty
+from utils.prototypicality import batch_calculate_difficulty, calculate_difficulty, batch_difficulty_tensor, LearnableCentroids
+from utils.multiview_prototypicality import compute_multiview_difficulty, compute_crossmodal_agreement
 
 
 def soft_cross_entropy(logits, soft_targets, class_weights=None):
@@ -115,7 +121,8 @@ def _prepare_model_inputs(batch, config, model, device):
 
 def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 contrastive_criterion=None, domain_discriminator=None, domain_adv_loss=None,
-                proto_predictor=None, scaler=None, global_step=0, current_epoch=0):
+                proto_predictor=None, scaler=None, global_step=0, current_epoch=0,
+                modality_discriminator=None, centroid_tracker=None):
     """
     Train for one epoch
 
@@ -141,6 +148,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     model.train()
     if domain_discriminator is not None:
         domain_discriminator.train()
+    if modality_discriminator is not None:
+        modality_discriminator.train()
     if proto_predictor is not None:
         proto_predictor.train()
 
@@ -148,6 +157,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     total_primary_loss = 0
     total_contrastive_loss = 0
     total_adversarial_loss = 0
+    total_modality_adversarial_loss = 0
     total_proto_pred_loss = 0
 
     all_predictions = []
@@ -176,13 +186,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         model_inputs = _prepare_model_inputs(batch, config, model, device)
 
         # Forward pass with embedding extraction (inside autocast for mixed precision)
-        use_embeddings = config.use_contrastive or getattr(config, 'use_domain_adversarial', False) or getattr(config, 'use_proto_predictor', False)
+        _ce_src = getattr(config, 'ce_weight_source', 'vad')
+        _ce_needs_modal = (getattr(config, 'use_prototypical_weighting', False)
+                           and _ce_src in ('agreement', 'both')
+                           and config.modality == 'both')
+        use_embeddings = (config.use_contrastive
+                          or getattr(config, 'use_domain_adversarial', False)
+                          or getattr(config, 'use_modality_adversarial', False)
+                          or getattr(config, 'use_proto_predictor', False)
+                          or _ce_needs_modal)
         raw_embeddings = None
         embeddings_norm = None
         modal_features = None
 
         with autocast('cuda', enabled=use_amp):
             if use_embeddings:
+                # When modality adversarial is active, keep gradients flowing into
+                # the audio/text encoders via modal_features (no detach)
+                if modality_discriminator is not None:
+                    model_inputs['detach_modal_features'] = False
                 result = model(**model_inputs, return_embeddings=True)
                 logits, projected_embeddings, raw_embeddings, modal_features = result
                 embeddings_norm = F.normalize(projected_embeddings, p=2, dim=1)
@@ -230,11 +252,28 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     if use_proto_weight:
                         # Weight per-sample loss by prototypicality
                         if not use_label_smooth:
-                            difficulties = batch_calculate_difficulty(batch, config.expected_vad).to(device)
+                            ce_src = getattr(config, 'ce_weight_source', 'vad')
+                            if centroid_tracker is not None:
+                                # On-graph: gradients flow back to centroids in grad mode
+                                d_vad = batch_difficulty_tensor(batch, centroid_tracker(), device)
+                            else:
+                                d_vad = batch_calculate_difficulty(batch, config.expected_vad).to(device)
+                            if ce_src == 'vad':
+                                difficulties = d_vad
+                            else:
+                                d_agree = compute_crossmodal_agreement(modal_features, device)
+                                if d_agree is None:
+                                    difficulties = d_vad
+                                elif ce_src == 'agreement':
+                                    difficulties = d_agree
+                                else:  # "both"
+                                    w = getattr(config, 'ce_weight_both_vad_w', 0.5)
+                                    difficulties = w * d_vad + (1.0 - w) * d_agree
                         else:
                             difficulties = difficulties.squeeze(1)  # undo unsqueeze from label smoothing
                         alpha = getattr(config, 'prototypical_weighting_alpha', 2.0)
-                        sample_weights = torch.exp(-alpha * difficulties)  # [B]
+                        sign = 1.0 if getattr(config, 'ce_weight_invert', False) else -1.0
+                        sample_weights = torch.exp(sign * alpha * difficulties)  # [B]
                         # Normalize so weights have mean 1 (preserves gradient scale)
                         sample_weights = sample_weights * (sample_weights.numel() / (sample_weights.sum() + 1e-8))
                         loss_primary = (per_sample_loss * sample_weights).mean()
@@ -244,6 +283,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 preds = torch.argmax(logits, dim=-1).cpu().numpy()
                 all_predictions.extend(preds)
                 all_labels.extend(labels.cpu().numpy())
+
+                # EMA update for learned centroids (no gradient)
+                if centroid_tracker is not None and centroid_tracker.mode == "ema":
+                    centroid_tracker.ema_update(batch, device)
 
             # Contrastive loss
             loss_contrastive = torch.tensor(0.0, device=device)
@@ -294,6 +337,40 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     else:
                         loss_adversarial = domain_adv_loss(domain_logits, domain_labels)
 
+            # Modality-level adversarial loss: GRL applied pre-fusion, per modality
+            loss_modality_adversarial = torch.tensor(0.0, device=device)
+            if (modality_discriminator is not None and domain_adv_loss is not None
+                    and modal_features is not None):
+                corpus_names = batch['dataset']
+                unique_corpora = sorted(set(corpus_names))
+                corpus_to_id = {name: i for i, name in enumerate(unique_corpora)}
+                domain_labels_mod = torch.tensor(
+                    [corpus_to_id[n] for n in corpus_names], device=device
+                )
+
+                if len(unique_corpora) > 1:
+                    audio_feat = modal_features['audio']
+                    text_feat = modal_features['text']
+                    audio_dom_logits, text_dom_logits = modality_discriminator(
+                        audio_feat, text_feat
+                    )
+
+                    if getattr(config, 'use_prototypical_adversarial', True):
+                        difficulties_ma = batch_calculate_difficulty(
+                            batch, config.expected_vad
+                        ).to(device)
+                        loss_audio_adv = domain_adv_loss(
+                            audio_dom_logits, domain_labels_mod, difficulties_ma
+                        )
+                        loss_text_adv = domain_adv_loss(
+                            text_dom_logits, domain_labels_mod, difficulties_ma
+                        )
+                    else:
+                        loss_audio_adv = domain_adv_loss(audio_dom_logits, domain_labels_mod)
+                        loss_text_adv = domain_adv_loss(text_dom_logits, domain_labels_mod)
+
+                    loss_modality_adversarial = 0.5 * (loss_audio_adv + loss_text_adv)
+
             # Auxiliary prototypicality prediction loss
             loss_proto_pred = torch.tensor(0.0, device=device)
             if proto_predictor is not None and raw_embeddings is not None:
@@ -310,11 +387,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
 
             # Combined loss
             adv_weight = getattr(config, 'adversarial_weight', 0.0)
+            modality_adv_weight = getattr(config, 'modality_adv_weight', 0.0)
             proto_pred_weight = getattr(config, 'proto_predictor_weight', 0.0)
             cross_modal_weight = getattr(config, 'cross_modal_weight', 0.1)
             loss = (loss_primary
                     + effective_contrastive_weight * loss_contrastive
                     + adv_weight * loss_adversarial
+                    + modality_adv_weight * loss_modality_adversarial
                     + proto_pred_weight * loss_proto_pred
                     + cross_modal_weight * loss_cross_modal)
 
@@ -325,6 +404,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             total_contrastive_loss += loss_contrastive.item()
         if domain_discriminator is not None:
             total_adversarial_loss += loss_adversarial.item()
+        if modality_discriminator is not None:
+            total_modality_adversarial_loss += loss_modality_adversarial.item()
         if proto_predictor is not None:
             total_proto_pred_loss += loss_proto_pred.item()
 
@@ -351,6 +432,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     avg_primary_loss = total_primary_loss / len(dataloader)
     avg_contrastive_loss = total_contrastive_loss / len(dataloader) if config.use_contrastive else 0.0
     avg_adversarial_loss = total_adversarial_loss / len(dataloader) if domain_discriminator is not None else 0.0
+    avg_modality_adversarial_loss = total_modality_adversarial_loss / len(dataloader) if modality_discriminator is not None else 0.0
     avg_proto_pred_loss = total_proto_pred_loss / len(dataloader) if proto_predictor is not None else 0.0
 
     if config.task_type == "regression":
@@ -365,6 +447,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         'primary_loss': avg_primary_loss,
         'contrastive_loss': avg_contrastive_loss,
         'adversarial_loss': avg_adversarial_loss,
+        'modality_adversarial_loss': avg_modality_adversarial_loss,
         'proto_pred_loss': avg_proto_pred_loss,
         'effective_contrastive_weight': effective_contrastive_weight,
         'global_step': global_step,
@@ -458,6 +541,175 @@ def _compute_per_sample_difficulty(train_dataset, config):
         )
         difficulties.append(diff)
     return np.array(difficulties)
+
+
+def get_checkpoint_paths(config):
+    """Return (ckpt_dir, latest_path, status_path, results_path) for this run."""
+    ckpt_dir = Path("checkpoints") / f"{config.experiment_name}_seed{config.seed}"
+    return (
+        ckpt_dir,
+        ckpt_dir / "latest.pt",
+        ckpt_dir / "status.json",
+        ckpt_dir / "results.json",
+    )
+
+
+def is_run_finished(config):
+    """Check if this experiment+seed has already completed."""
+    _, _, status_path, results_path = get_checkpoint_paths(config)
+    if not status_path.exists() or not results_path.exists():
+        return False
+    try:
+        with open(status_path, 'r') as f:
+            status = json.load(f)
+        return status.get('status') == 'done'
+    except (json.JSONDecodeError, IOError):
+        return False
+
+
+def load_finished_results(config):
+    """Load cached results.json from a previously finished run."""
+    _, _, _, results_path = get_checkpoint_paths(config)
+    with open(results_path, 'r') as f:
+        return json.load(f)
+
+
+def save_checkpoint(config, epoch, global_step, model, optimizer, scheduler,
+                    scaler, contrastive_criterion, domain_discriminator,
+                    modality_discriminator, proto_predictor,
+                    best_val_metric, best_model_state, best_contrastive_state,
+                    epochs_without_improvement, wandb_run_id):
+    """Atomic checkpoint save: write to .tmp then rename."""
+    ckpt_dir, latest_path, status_path, _ = get_checkpoint_paths(config)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        'epoch': epoch,
+        'global_step': global_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_val_metric': best_val_metric,
+        'best_model_state': best_model_state,
+        'epochs_without_improvement': epochs_without_improvement,
+        'torch_rng_state': torch.get_rng_state(),
+        'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        'numpy_rng_state': np.random.get_state(),
+        'python_rng_state': random.getstate(),
+        'config': config.to_dict(),
+        'wandb_run_id': wandb_run_id,
+    }
+    if scaler is not None:
+        state['scaler_state_dict'] = scaler.state_dict()
+    if contrastive_criterion is not None and hasattr(contrastive_criterion, 'state_dict'):
+        state['contrastive_state_dict'] = contrastive_criterion.state_dict()
+    if best_contrastive_state is not None:
+        state['best_contrastive_state'] = best_contrastive_state
+    if domain_discriminator is not None:
+        state['domain_discriminator_state_dict'] = domain_discriminator.state_dict()
+    if modality_discriminator is not None:
+        state['modality_discriminator_state_dict'] = modality_discriminator.state_dict()
+    if proto_predictor is not None:
+        state['proto_predictor_state_dict'] = proto_predictor.state_dict()
+
+    tmp_path = latest_path.with_suffix('.pt.tmp')
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, latest_path)
+
+    status = {
+        'status': 'running',
+        'epoch': epoch,
+        'total_epochs': config.num_epochs,
+        'experiment_name': config.experiment_name,
+        'seed': config.seed,
+    }
+    status_tmp = status_path.with_suffix('.json.tmp')
+    with open(status_tmp, 'w') as f:
+        json.dump(status, f, indent=2)
+    os.replace(status_tmp, status_path)
+
+
+def load_checkpoint(config, model, optimizer, scheduler, scaler,
+                    contrastive_criterion, domain_discriminator,
+                    modality_discriminator, proto_predictor, device):
+    """Load checkpoint if it exists. Returns dict with resume state or None."""
+    _, latest_path, status_path, _ = get_checkpoint_paths(config)
+    if not latest_path.exists():
+        return None
+
+    print(f"\n  Found checkpoint: {latest_path}")
+    state = torch.load(latest_path, map_location=device, weights_only=False)
+
+    model.load_state_dict(state['model_state_dict'])
+    optimizer.load_state_dict(state['optimizer_state_dict'])
+    scheduler.load_state_dict(state['scheduler_state_dict'])
+    if scaler is not None and 'scaler_state_dict' in state:
+        scaler.load_state_dict(state['scaler_state_dict'])
+    if contrastive_criterion is not None and 'contrastive_state_dict' in state:
+        contrastive_criterion.load_state_dict(state['contrastive_state_dict'])
+    if domain_discriminator is not None and 'domain_discriminator_state_dict' in state:
+        domain_discriminator.load_state_dict(state['domain_discriminator_state_dict'])
+    if modality_discriminator is not None and 'modality_discriminator_state_dict' in state:
+        modality_discriminator.load_state_dict(state['modality_discriminator_state_dict'])
+    if proto_predictor is not None and 'proto_predictor_state_dict' in state:
+        proto_predictor.load_state_dict(state['proto_predictor_state_dict'])
+
+    # Restore RNG state so continuation is deterministic
+    torch.set_rng_state(state['torch_rng_state'].cpu())
+    if state.get('cuda_rng_state') is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([s.cpu() for s in state['cuda_rng_state']])
+    np.random.set_state(state['numpy_rng_state'])
+    random.setstate(state['python_rng_state'])
+
+    print(f"  Resuming from epoch {state['epoch']}/{config.num_epochs}, "
+          f"best_val_metric={state['best_val_metric']:.4f}")
+
+    return {
+        'start_epoch': state['epoch'],
+        'global_step': state['global_step'],
+        'best_val_metric': state['best_val_metric'],
+        'best_model_state': state['best_model_state'],
+        'best_contrastive_state': state.get('best_contrastive_state'),
+        'epochs_without_improvement': state['epochs_without_improvement'],
+        'wandb_run_id': state.get('wandb_run_id'),
+    }
+
+
+def mark_run_done(config, results):
+    """Write results.json and update status to done. Clean up latest.pt."""
+    ckpt_dir, latest_path, status_path, results_path = get_checkpoint_paths(config)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Serialize results — strip tensors/non-JSON by converting to plain python
+    def _clean(obj):
+        if isinstance(obj, dict):
+            return {k: _clean(v) for k, v in obj.items()
+                    if not isinstance(v, (torch.Tensor,)) and k not in ('predictions', 'labels')}
+        if isinstance(obj, list):
+            return [_clean(v) for v in obj]
+        if isinstance(obj, (np.floating, np.integer)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    with open(results_path, 'w') as f:
+        json.dump(_clean(results), f, indent=2)
+
+    status = {
+        'status': 'done',
+        'epoch': config.num_epochs,
+        'total_epochs': config.num_epochs,
+        'experiment_name': config.experiment_name,
+        'seed': config.seed,
+    }
+    with open(status_path, 'w') as f:
+        json.dump(status, f, indent=2)
+
+    # Keep latest.pt around in case user wants to resume from last state —
+    # but it's large, so delete to save disk. Best model is in saved_models/.
+    if latest_path.exists():
+        latest_path.unlink()
 
 
 def train(config, datasets=None):
@@ -656,34 +908,67 @@ def train(config, datasets=None):
 
     # Domain adversarial training
     domain_discriminator = None
+    modality_discriminator = None
     domain_adv_loss = None
     use_adversarial = getattr(config, 'use_domain_adversarial', False)
+    use_modality_adversarial = getattr(config, 'use_modality_adversarial', False)
+
+    # Determine number of domains from training data
+    train_names = config.train_dataset
+    if isinstance(train_names, str):
+        train_names = [train_names]
+    num_domains = len(train_names)
+
+    if (use_adversarial or use_modality_adversarial) and num_domains < 2:
+        print("   WARNING: Domain adversarial requires multi-corpus training. Disabling.")
+        use_adversarial = False
+        use_modality_adversarial = False
+
+    if use_adversarial or use_modality_adversarial:
+        adv_alpha = getattr(config, 'adversarial_alpha', 2.0)
+        adv_hidden = getattr(config, 'adversarial_hidden_dim', 256)
+        domain_adv_loss = PrototypicalDomainAdversarialLoss(alpha=adv_alpha).to(device)
+        print(f"   Domain adversarial: {num_domains} domains, alpha={adv_alpha}")
+        print(f"   Prototypicality-weighted: {getattr(config, 'use_prototypical_adversarial', True)}")
 
     if use_adversarial:
-        # Determine number of domains from training data
-        train_names = config.train_dataset
-        if isinstance(train_names, str):
-            train_names = [train_names]
-        num_domains = len(train_names)
+        adv_hidden = getattr(config, 'adversarial_hidden_dim', 256)
+        domain_discriminator = DomainDiscriminator(
+            input_dim=config.hidden_dim,
+            hidden_dim=adv_hidden,
+            num_domains=num_domains,
+        ).to(device)
+        print(f"   Embedding-level discriminator: hidden={adv_hidden}")
+        print(f"   Adversarial weight: {getattr(config, 'adversarial_weight', 0.1)}")
 
-        if num_domains < 2:
-            print("   WARNING: Domain adversarial requires multi-corpus training. Disabling.")
-            use_adversarial = False
+    if use_modality_adversarial:
+        if config.modality != "both":
+            print("   WARNING: Modality adversarial requires modality='both'. Disabling.")
+            use_modality_adversarial = False
         else:
-            adv_alpha = getattr(config, 'adversarial_alpha', 2.0)
             adv_hidden = getattr(config, 'adversarial_hidden_dim', 256)
-
-            domain_discriminator = DomainDiscriminator(
-                input_dim=config.hidden_dim,
+            # Pre-fusion audio/text feature dims (before the fusion module)
+            audio_feat_dim = model.audio_dim if hasattr(model, 'audio_dim') else 768
+            text_feat_dim = model.text_dim if getattr(model, 'text_dim', None) else 768
+            modality_discriminator = ModalityDomainDiscriminator(
+                audio_dim=audio_feat_dim,
+                text_dim=text_feat_dim,
                 hidden_dim=adv_hidden,
                 num_domains=num_domains,
             ).to(device)
+            print(f"   Modality-level discriminator: audio={audio_feat_dim}, text={text_feat_dim}")
+            print(f"   Modality adversarial weight: {getattr(config, 'modality_adv_weight', 0.1)}")
 
-            domain_adv_loss = PrototypicalDomainAdversarialLoss(alpha=adv_alpha).to(device)
-
-            print(f"   Domain adversarial: {num_domains} domains, alpha={adv_alpha}")
-            print(f"   Adversarial weight: {getattr(config, 'adversarial_weight', 0.1)}")
-            print(f"   Prototypicality-weighted: {getattr(config, 'use_prototypical_adversarial', True)}")
+    # Learnable VAD centroids (for CE prototypicality weighting)
+    centroid_tracker = None
+    if getattr(config, 'use_learned_centroids', False):
+        centroid_tracker = LearnableCentroids(
+            expected_vad=config.expected_vad,
+            num_classes=config.num_classes,
+            mode=getattr(config, 'learned_centroid_mode', 'ema'),
+            momentum=getattr(config, 'learned_centroid_momentum', 0.9),
+        ).to(device)
+        print(f"   Learnable centroids: mode={centroid_tracker.mode}, momentum={centroid_tracker.momentum}")
 
     # Auxiliary prototypicality predictor
     proto_predictor = None
@@ -731,8 +1016,14 @@ def train(config, datasets=None):
         param_groups.append({'params': list(contrastive_criterion.parameters()), 'lr': config.learning_rate})
     if domain_discriminator is not None:
         param_groups.append({'params': list(domain_discriminator.parameters()), 'lr': config.learning_rate})
+    if modality_discriminator is not None:
+        param_groups.append({'params': list(modality_discriminator.parameters()), 'lr': config.learning_rate})
     if proto_predictor is not None:
         param_groups.append({'params': list(proto_predictor.parameters()), 'lr': config.learning_rate})
+    if centroid_tracker is not None and centroid_tracker.mode == "grad":
+        centroid_lr = getattr(config, 'learned_centroid_lr', 1e-3)
+        param_groups.append({'params': list(centroid_tracker.parameters()), 'lr': centroid_lr})
+        print(f"   Centroid LR (grad mode): {centroid_lr:.2e}")
 
     optimizer = torch.optim.Adam(
         param_groups,
@@ -751,12 +1042,23 @@ def train(config, datasets=None):
     if use_amp:
         print(f"   Mixed precision (fp16): enabled (scaler={'on' if scaler else 'off'})")
 
-    # Initialize WandB
-    wandb.init(
-        project=config.wandb_project,
-        name=config.experiment_name,
-        config=config.to_dict()
+    # Try to load checkpoint (for resume)
+    resume_state = load_checkpoint(
+        config, model, optimizer, scheduler, scaler,
+        contrastive_criterion, domain_discriminator,
+        modality_discriminator, proto_predictor, device,
     )
+
+    # Initialize WandB — resume existing run if we have a run ID
+    wandb_init_kwargs = {
+        'project': config.wandb_project,
+        'name': config.experiment_name,
+        'config': config.to_dict(),
+    }
+    if resume_state is not None and resume_state.get('wandb_run_id'):
+        wandb_init_kwargs['id'] = resume_state['wandb_run_id']
+        wandb_init_kwargs['resume'] = 'allow'
+    wandb.init(**wandb_init_kwargs)
     # Per-step x-axis for training loss
     wandb.define_metric("train/global_step")
     wandb.define_metric("train/step_loss", step_metric="train/global_step")
@@ -780,6 +1082,20 @@ def train(config, datasets=None):
     best_val_metric = 0.0
     best_model_state = None
     best_contrastive_state = None
+
+    # Track current wandb run id for checkpoint metadata
+    wandb_run_id = wandb.run.id if wandb.run is not None else None
+
+    # Apply resume state if we loaded a checkpoint
+    resume_start_epoch = 0
+    resume_global_step = 0
+    if resume_state is not None:
+        resume_start_epoch = resume_state['start_epoch']
+        resume_global_step = resume_state['global_step']
+        best_val_metric = resume_state['best_val_metric']
+        best_model_state = resume_state['best_model_state']
+        best_contrastive_state = resume_state.get('best_contrastive_state')
+        epochs_without_improvement = resume_state['epochs_without_improvement']
 
     # Determine training stages
     if use_two_stage:
@@ -807,8 +1123,8 @@ def train(config, datasets=None):
             },
         ]
 
-    global_epoch = 0
-    global_step = 0
+    global_epoch = resume_start_epoch
+    global_step = resume_global_step
 
     for stage in stages:
         stage_name = stage['name']
@@ -833,8 +1149,8 @@ def train(config, datasets=None):
             persistent_workers=persistent,
         )
 
-        # Apply LR factor for stage 2
-        if lr_factor != 1.0:
+        # Apply LR factor for stage 2 (skip on resume — already in optimizer state)
+        if lr_factor != 1.0 and resume_state is None:
             for pg in optimizer.param_groups:
                 pg['lr'] = pg['lr'] * lr_factor
             print(f"   LR reduced by {lr_factor}x")
@@ -844,21 +1160,34 @@ def train(config, datasets=None):
             epochs_without_improvement = 0
 
         for epoch_in_stage in range(stage_epochs):
+            # Skip epochs already completed in a previous run
+            if (global_epoch + 1) <= resume_start_epoch:
+                global_epoch += 1
+                continue
+
             global_epoch += 1
             print(f"\n  Epoch {global_epoch}/{config.num_epochs} ({stage_name})")
 
-            # Schedule GRL lambda (ramp up adversarial strength over training)
-            if domain_discriminator is not None:
-                # Linear ramp from 0 to 1 over first half of training
-                p = min(1.0, global_epoch / (config.num_epochs * 0.5))
-                grl_lambda = 2.0 / (1.0 + np.exp(-10 * p)) - 1.0  # Sigmoid schedule
-                domain_discriminator.set_lambda(grl_lambda)
+            # Schedule GRL lambda (sigmoid ramp, scaled by peak lambda)
+            grl_lambda = 0.0
+            if domain_discriminator is not None or modality_discriminator is not None:
+                peak_lambda = getattr(config, 'adversarial_peak_lambda', 1.0)
+                warmup_frac = getattr(config, 'adversarial_warmup_frac', 0.5)
+                warmup_frac = max(1e-6, warmup_frac)
+                p = min(1.0, global_epoch / (config.num_epochs * warmup_frac))
+                grl_lambda = peak_lambda * (2.0 / (1.0 + np.exp(-10 * p)) - 1.0)
+                if domain_discriminator is not None:
+                    domain_discriminator.set_lambda(grl_lambda)
+                if modality_discriminator is not None:
+                    modality_discriminator.set_lambda(grl_lambda)
 
             # Train
             train_metrics = train_epoch(
                 model, stage_loader, criterion, optimizer, device, config,
                 contrastive_criterion, domain_discriminator, domain_adv_loss,
-                proto_predictor, scaler, global_step, current_epoch=global_epoch
+                proto_predictor, scaler, global_step, current_epoch=global_epoch,
+                modality_discriminator=modality_discriminator,
+                centroid_tracker=centroid_tracker,
             )
             global_step = train_metrics['global_step']
 
@@ -887,6 +1216,10 @@ def train(config, datasets=None):
 
             if domain_discriminator is not None:
                 log_dict['train/adversarial_loss'] = train_metrics['adversarial_loss']
+                log_dict['train/grl_lambda'] = grl_lambda
+
+            if modality_discriminator is not None:
+                log_dict['train/modality_adversarial_loss'] = train_metrics['modality_adversarial_loss']
                 log_dict['train/grl_lambda'] = grl_lambda
 
             if proto_predictor is not None:
@@ -922,6 +1255,7 @@ def train(config, datasets=None):
                 print(f"   Val:   Acc={val_metrics['accuracy']:.4f}, UAR={val_metrics['uar']:.4f}")
 
             # Save best model + early stopping
+            early_stop_triggered = False
             if current_metric > best_val_metric:
                 best_val_metric = current_metric
                 best_model_state = model.state_dict().copy()
@@ -933,7 +1267,20 @@ def train(config, datasets=None):
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= early_stopping_patience:
                     print(f"   Early stopping: no improvement for {early_stopping_patience} epochs")
-                    break
+                    early_stop_triggered = True
+
+            # Checkpoint after each epoch (atomic write)
+            save_checkpoint(
+                config, global_epoch, global_step,
+                model, optimizer, scheduler, scaler,
+                contrastive_criterion, domain_discriminator,
+                modality_discriminator, proto_predictor,
+                best_val_metric, best_model_state, best_contrastive_state,
+                epochs_without_improvement, wandb_run_id,
+            )
+
+            if early_stop_triggered:
+                break
 
     # Load best model and evaluate on test sets
     print(f"\n  Evaluating on test datasets...")
@@ -1005,6 +1352,10 @@ def train(config, datasets=None):
     torch.save(save_dict, save_path)
 
     print(f"\n  Model saved to: {save_path}")
+
+    # Mark run as finished — writes results.json and status=done, removes latest.pt
+    mark_run_done(config, results)
+
     wandb.finish()
 
     return results
