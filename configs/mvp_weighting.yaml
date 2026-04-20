@@ -78,50 +78,67 @@ template_config: &template
 
 experiments:
   # 1. Baseline: uniform CE
+  # - <<: *template
+  #   name: "MSPP_mvp_uniform"
+  # 2. VAD prototypicality weighting
+
+  
   - <<: *template
-    name: "MSPP_mvp_uniform"
+    name: "MSPP_mvp_vad_a1"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    prototypical_weighting_alpha: 1.0
+
 
   # 2. VAD prototypicality weighting
   - <<: *template
-    name: "MSPP_mvp_vad"
+    name: "MSPP_mvp_vad_a3"
     use_prototypical_weighting: true
     ce_weight_source: "vad"
+    prototypical_weighting_alpha: 3.0
 
-  # 3. Cross-modal agreement weighting
+  # 2. VAD prototypicality weighting
   - <<: *template
-    name: "MSPP_mvp_agreement"
-    use_prototypical_weighting: true
-    ce_weight_source: "agreement"
-
-  # 4. Both combined (50/50)
-  - <<: *template
-    name: "MSPP_mvp_both"
-    use_prototypical_weighting: true
-    ce_weight_source: "both"
-    ce_weight_both_vad_w: 0.5
-
-  # 5. Inverse VAD — up-weight atypical samples
-  - <<: *template
-    name: "MSPP_mvp_vad_inverse"
+    name: "MSPP_mvp_vad_a3"
     use_prototypical_weighting: true
     ce_weight_source: "vad"
-    ce_weight_invert: true
-    prototypical_weighting_alpha: 1.0  # gentler — exp(+α·d) is very spiky
+    prototypical_weighting_alpha: 4.0
 
-  # 6. Learnable centroids (EMA) + VAD weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_learned_ema"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    use_learned_centroids: true
-    learned_centroid_mode: "ema"
-    learned_centroid_momentum: 0.9
+  # # 3. Cross-modal agreement weighting
+  # - <<: *template
+  #   name: "MSPP_mvp_agreement"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "agreement"
 
-  # 7. Learnable centroids (gradient) + VAD weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_learned_grad"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    use_learned_centroids: true
-    learned_centroid_mode: "grad"
-    learned_centroid_lr: 1e-3
+  # # 4. Both combined (50/50)
+  # - <<: *template
+  #   name: "MSPP_mvp_both"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "both"
+    # ce_weight_both_vad_w: 0.5
+
+  # # 5. Inverse VAD — up-weight atypical samples
+  # - <<: *template
+  #   name: "MSPP_mvp_vad_inverse"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "vad"
+  #   ce_weight_invert: true
+  #   prototypical_weighting_alpha: 1.0  # gentler — exp(+α·d) is very spiky
+
+  # # 6. Learnable centroids (EMA) + VAD weighting
+  # - <<: *template
+  #   name: "MSPP_mvp_vad_learned_ema"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "vad"
+  #   use_learned_centroids: true
+  #   learned_centroid_mode: "ema"
+  #   learned_centroid_momentum: 0.9
+
+  # # 7. Learnable centroids (gradient) + VAD weighting
+  # - <<: *template
+  #   name: "MSPP_mvp_vad_learned_grad"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "vad"
+  #   use_learned_centroids: true
+  #   learned_centroid_mode: "grad"
+  #   learned_centroid_lr: 1e-3
