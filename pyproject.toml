@@ -1,0 +1,38 @@
+[project]
+name = "emotion2vec-contrastive"
+version = "0.1.0"
+description = "Prototypicality-weighted supervised contrastive learning for cross-corpus emotion recognition."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch==2.7.1+cu118",
+    "torchaudio==2.7.1+cu118",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scikit-learn>=1.5",
+    "pyyaml>=6.0",
+    "datasets>=3.0",
+    "transformers>=4.49",
+    "funasr>=1.2.6",
+    "wandb>=0.20",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.0",
+    "ipykernel>=6.29",
+    "ipython>=8.30",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]

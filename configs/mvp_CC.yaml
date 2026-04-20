@@ -1,0 +1,127 @@
+# MVP: Prototypicality-weighted CE only
+# Train IEMO+MSPI, test MSPP+CMUMOSEI+SAMSEMO
+# No contrastive, no DANN — just CE with per-sample weighting
+# 4 experiments x 1 seed = 4 runs
+# Run with: python runner.py --config configs/mvp_weighting.yaml --all
+
+template_config: &template
+  wandb_project: "MVP_Weighting_CC"
+  seeds: [42,189,902]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Encoders — small unfreeze for speed
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 4
+  audio_learning_rate: 5e-7
+  max_audio_seconds: 25
+
+  unfreeze_bert_layers: 4
+  bert_learning_rate: 5e-7
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training
+  num_epochs: 20
+  batch_size: 64
+  eval_batch_size: 64
+  gradient_accumulation_steps: 2
+  num_workers: 8
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.1
+  early_stopping_patience: 3
+
+  # CE weighting (overridden per-experiment)
+  use_prototypical_weighting: false
+  prototypical_weighting_alpha: 2.0
+  ce_weight_source: "vad"
+
+  # Everything else OFF — clean MVP
+  use_contrastive: false
+  use_domain_adversarial: false
+  use_modality_adversarial: false
+  use_prototypical_adversarial: false
+  use_multiview_prototypicality: false
+  use_hard_negative_mining: false
+  use_memory_bank: false
+  use_cross_modal_projection: false
+  use_two_stage_training: false
+  use_prototypical_label_smoothing: false
+  use_proto_predictor: false
+
+  # Dataset: VAD-only training
+  train_dataset: ["MSPP"]
+  test_datasets: ["MSPI", "IEMO","CMUMOSEI", "SAMSEMO"]
+
+  # MSPP centroids (same 4-class scheme as IEMO/MSPI training corpora)
+  expected_vad:
+    0: [0.4895, 0.4885, 0.5267]
+    1: [0.6369, 0.6091, 0.6089]
+    2: [0.3567, 0.3964, 0.4427]
+    3: [0.2475, 0.7317, 0.7516]
+
+
+experiments:
+  # 1. Baseline: uniform CE
+  - <<: *template
+    name: "MSPP_mvp_uniform"
+
+  # 2. VAD prototypicality weighting
+  - <<: *template
+    name: "MSPP_mvp_vad"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+
+  # 3. Cross-modal agreement weighting
+  - <<: *template
+    name: "MSPP_mvp_agreement"
+    use_prototypical_weighting: true
+    ce_weight_source: "agreement"
+
+  # 4. Both combined (50/50)
+  - <<: *template
+    name: "MSPP_mvp_both"
+    use_prototypical_weighting: true
+    ce_weight_source: "both"
+    ce_weight_both_vad_w: 0.5
+
+  # 5. Inverse VAD — up-weight atypical samples
+  - <<: *template
+    name: "MSPP_mvp_vad_inverse"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    ce_weight_invert: true
+    prototypical_weighting_alpha: 1.0  # gentler — exp(+α·d) is very spiky
+
+  # 6. Learnable centroids (EMA) + VAD weighting
+  - <<: *template
+    name: "MSPP_mvp_vad_learned_ema"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    use_learned_centroids: true
+    learned_centroid_mode: "ema"
+    learned_centroid_momentum: 0.9
+
+  # 7. Learnable centroids (gradient) + VAD weighting
+  - <<: *template
+    name: "MSPP_mvp_vad_learned_grad"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    use_learned_centroids: true
+    learned_centroid_mode: "grad"
+    learned_centroid_lr: 1e-3
