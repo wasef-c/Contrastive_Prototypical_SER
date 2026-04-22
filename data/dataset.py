@@ -93,107 +93,60 @@ class EmotionDataset(Dataset):
         skipped_vad_count = 0
         skipped_label_count = 0
 
-        for hf_idx, item in enumerate(self.hf_dataset):
-            # Extract label (numeric 'label' column, or string 'EmoClass' fallback)
-            if "label" in item:
-                label = item["label"]
-            elif "EmoClass" in item:
-                label = self.EMOCLASS_TO_LABEL.get(item["EmoClass"], -1)
-            else:
+        # 1. Fetch entire columns as lists (Massive I/O speedup)
+        # Accessing self.hf_dataset['column'] is vectorized in Arrow
+        cols = self.hf_dataset.column_names
+        all_labels = self.hf_dataset["label"] if "label" in cols else [None] * len(self.hf_dataset)
+        all_emoclass = self.hf_dataset["EmoClass"] if "EmoClass" in cols else [None] * len(self.hf_dataset)
+        
+        # VAD Column mapping (Handles multiple naming conventions)
+        all_val = self.hf_dataset["valence"] if "valence" in cols else (self.hf_dataset["EmoVal"] if "EmoVal" in cols else [None] * len(self.hf_dataset))
+        all_act = self.hf_dataset["arousal"] if "arousal" in cols else (self.hf_dataset["EmoAct"] if "EmoAct" in cols else [None] * len(self.hf_dataset))
+        all_dom = self.hf_dataset["dominance"] if "dominance" in cols else (self.hf_dataset["EmoDom"] if "EmoDom" in cols else [None] * len(self.hf_dataset))
+        
+        all_transcripts = [None] * len(self.hf_dataset)
+        if self.modality in ["text", "both"]:
+            all_transcripts = self.hf_dataset["transcript"] if "transcript" in cols else (self.hf_dataset["text"] if "text" in cols else ["[EMPTY]"] * len(self.hf_dataset))
+
+        self.data = []
+        for i in range(len(self.hf_dataset)):
+            # Determine label
+            label = all_labels[i]
+            if label is None and all_emoclass[i] is not None:
+                label = self.EMOCLASS_TO_LABEL.get(all_emoclass[i], -1)
+            
+            if label is None or label < 0 or label > 3:
                 skipped_label_count += 1
                 continue
 
-            # Filter out invalid labels (CMUMOSEI/SAMSEMO have labels -1..6, keep only 0-3)
-            if label < 0 or label > 3:
-                skipped_label_count += 1
+            # Normalize VAD (Math is done on local variables, not disk objects)
+            def normalize(val):
+                if val is None or (isinstance(val, float) and math.isnan(val)):
+                    return 0.5
+                return (val - 1) / 6 if dataset_name == "MSPP" else (val - 1) / 4
+
+            v, a, d = normalize(all_val[i]), normalize(all_act[i]), normalize(all_dom[i])
+
+            if task_type == "regression" and (v == 0.5 and a == 0.5): # Rough check for missing
+                skipped_vad_count += 1
                 continue
 
-            # For raw audio: only validate the column exists, do NOT load audio yet
-            if self.modality in ["audio", "both"]:
-                if self.uses_raw_audio:
-                    if item.get("audio") is None:
-                        continue
-                else:
-                    # Preextracted: load features eagerly (768 floats, negligible size)
-                    if "emotion2vec_features" not in item or item["emotion2vec_features"] is None:
-                        continue
-
-            # Extract transcript
-            if self.modality in ["text", "both"]:
-                transcript = item.get("transcript", item.get("text", "[EMPTY]"))
-                if not transcript:
-                    transcript = "[EMPTY]"
-            else:
-                transcript = None
-
-            # Extract VAD values with multiple naming variants
-            valence = item.get("valence", item.get("consensus_valence", item.get("EmoVal", None)))
-            arousal = item.get("arousal", item.get("consensus_arousal", item.get("EmoAct", None)))
-            dominance = item.get("domination", item.get("consensus_dominance", item.get("EmoDom", None)))
-
-            # For regression, skip samples with missing VAD
-            if task_type == "regression":
-                if valence is None or (isinstance(valence, float) and math.isnan(valence)):
-                    skipped_vad_count += 1
-                    continue
-                if arousal is None or (isinstance(arousal, float) and math.isnan(arousal)):
-                    skipped_vad_count += 1
-                    continue
-                if dominance is None or (isinstance(dominance, float) and math.isnan(dominance)):
-                    skipped_vad_count += 1
-                    continue
-
-            # Normalize VAD to [0, 1] range
-            if valence is not None and not (isinstance(valence, float) and math.isnan(valence)):
-                if dataset_name == "MSPP":
-                    valence = (valence - 1) / 6  # 1-7 scale -> 0-1
-                else:  # IEMO, MSPI use 1-5 scale
-                    valence = (valence - 1) / 4  # 1-5 scale -> 0-1
-
-            if arousal is not None and not (isinstance(arousal, float) and math.isnan(arousal)):
-                if dataset_name == "MSPP":
-                    arousal = (arousal - 1) / 6
-                else:
-                    arousal = (arousal - 1) / 4
-
-            if dominance is not None and not (isinstance(dominance, float) and math.isnan(dominance)):
-                if dataset_name == "MSPP":
-                    dominance = (dominance - 1) / 6
-                else:
-                    dominance = (dominance - 1) / 4
-
-            # For classification, use midpoint if missing
-            if valence is None:
-                valence = 0.5
-            if arousal is None:
-                arousal = 0.5
-            if dominance is None:
-                dominance = 0.5
-
-            # Store lightweight metadata only
+            # Store metadata
             sample = {
-                "transcript": transcript,
+                "hf_idx": i,
                 "label": label,
-                "valence": valence,
-                "arousal": arousal,
-                "dominance": dominance,
+                "valence": v,
+                "arousal": a,
+                "dominance": d,
+                "transcript": all_transcripts[i] or "[EMPTY]",
                 "dataset": dataset_name,
             }
 
-            if self.uses_raw_audio:
-                # Store HF index for lazy waveform loading in __getitem__
-                sample["hf_idx"] = hf_idx
-            else:
-                # Preextracted features are small (768 floats), safe to load now
-                sample["features"] = item["emotion2vec_features"][0]["feats"]
+            # If preextracted, we still have to touch the feature column
+            if not self.uses_raw_audio:
+                sample["features"] = self.hf_dataset[i]["emotion2vec_features"][0]["feats"]
 
             self.data.append(sample)
-
-        print(f"  Loaded {len(self.data)} samples from {dataset_name}")
-        if skipped_vad_count > 0:
-            print(f"   Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
-        if skipped_label_count > 0:
-            print(f"   Skipped {skipped_label_count} samples with label > 3")
 
     def cache_encoder_features(self, encoder, device, batch_size=16):
         """

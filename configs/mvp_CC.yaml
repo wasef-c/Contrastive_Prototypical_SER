@@ -37,8 +37,8 @@ template_config: &template
 
   # Training
   num_epochs: 20
-  batch_size: 64
-  eval_batch_size: 64
+  batch_size: 48
+  eval_batch_size: 48
   gradient_accumulation_steps: 2
   num_workers: 8
   learning_rate: 5e-6
@@ -81,11 +81,35 @@ experiments:
   - <<: *template
     name: "MSPP_mvp_uniform"
 
-  # 2. VAD prototypicality weighting
+  # 2. VAD prototypicality weighting alpha 2.0
   - <<: *template
-    name: "MSPP_mvp_vad"
+    name: "MSPP_mvp_vad_a2"
     use_prototypical_weighting: true
     ce_weight_source: "vad"
+
+  # 2. VAD prototypicality weighting alpha 1.0
+  - <<: *template
+    name: "MSPP_mvp_vad_a1"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    prototypical_weighting_alpha: 1.0
+
+
+  # 2. VAD prototypicality weighting alpha 3.0
+  - <<: *template
+    name: "MSPP_mvp_vad_a3"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    prototypical_weighting_alpha: 3.0
+
+
+  # 2. VAD prototypicality weighting Hard Negative Mining alpha 2.0
+  - <<: *template
+    name: "MSPP_mvp_vad_HNa2"
+    use_prototypical_weighting: true
+    ce_weight_source: "vad"
+    use_hard_negative_mining: true
+
 
   # 3. Cross-modal agreement weighting
   - <<: *template
@@ -99,29 +123,3 @@ experiments:
     use_prototypical_weighting: true
     ce_weight_source: "both"
     ce_weight_both_vad_w: 0.5
-
-  # 5. Inverse VAD — up-weight atypical samples
-  - <<: *template
-    name: "MSPP_mvp_vad_inverse"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    ce_weight_invert: true
-    prototypical_weighting_alpha: 1.0  # gentler — exp(+α·d) is very spiky
-
-  # 6. Learnable centroids (EMA) + VAD weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_learned_ema"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    use_learned_centroids: true
-    learned_centroid_mode: "ema"
-    learned_centroid_momentum: 0.9
-
-  # 7. Learnable centroids (gradient) + VAD weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_learned_grad"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    use_learned_centroids: true
-    learned_centroid_mode: "grad"
-    learned_centroid_lr: 1e-3

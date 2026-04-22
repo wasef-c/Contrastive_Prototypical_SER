@@ -153,7 +153,9 @@ class Emotion2VecEncoder(nn.Module):
 
         print(f"Loading Emotion2Vec model: {model_name}")
         from funasr import AutoModel
-        auto_model = AutoModel(model=model_name)
+        # auto_model = AutoModel(model=model_name)
+        # In models/audio_encoder.py
+        auto_model = AutoModel(model="/home/carolw/links/scratch/modelscope_cache/models/iic/emotion2vec_base")
         self.model = auto_model.model  # Emotion2vec nn.Module
 
         self.normalize: bool = self.model.cfg.normalize

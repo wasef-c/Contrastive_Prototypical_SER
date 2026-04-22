@@ -5,8 +5,8 @@ description = "Prototypicality-weighted supervised contrastive learning for cros
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.7.1+cu118",
-    "torchaudio==2.7.1+cu118",
+    "torch==2.7.1+cu126",
+    "torchaudio==2.7.1+cu126",
     "numpy>=2.0",
     "pandas>=2.2",
     "scikit-learn>=1.5",
@@ -15,24 +15,22 @@ dependencies = [
     "transformers>=4.49",
     "funasr>=1.2.6",
     "wandb>=0.20",
+    "torchcodec==0.5.0+cu126",
 ]
-
 [dependency-groups]
 dev = [
     "black>=25.0",
     "ipykernel>=6.29",
     "ipython>=8.30",
 ]
-
 [[tool.uv.index]]
-name = "pytorch-cu118"
-url = "https://download.pytorch.org/whl/cu118"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
-
 [tool.uv.sources]
-torch = { index = "pytorch-cu118" }
-torchaudio = { index = "pytorch-cu118" }
-
+torch = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
+torchcodec = { index = "pytorch-cu126" }
 [tool.black]
 line-length = 100
 target-version = ["py310"]
