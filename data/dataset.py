@@ -93,60 +93,92 @@ class EmotionDataset(Dataset):
         skipped_vad_count = 0
         skipped_label_count = 0
 
-        # 1. Fetch entire columns as lists (Massive I/O speedup)
-        # Accessing self.hf_dataset['column'] is vectorized in Arrow
+        # Fetch columns in a single vectorized Arrow access (huge speedup vs
+        # per-row dict iteration, especially on Lustre).
         cols = self.hf_dataset.column_names
-        all_labels = self.hf_dataset["label"] if "label" in cols else [None] * len(self.hf_dataset)
-        all_emoclass = self.hf_dataset["EmoClass"] if "EmoClass" in cols else [None] * len(self.hf_dataset)
-        
-        # VAD Column mapping (Handles multiple naming conventions)
-        all_val = self.hf_dataset["valence"] if "valence" in cols else (self.hf_dataset["EmoVal"] if "EmoVal" in cols else [None] * len(self.hf_dataset))
-        all_act = self.hf_dataset["arousal"] if "arousal" in cols else (self.hf_dataset["EmoAct"] if "EmoAct" in cols else [None] * len(self.hf_dataset))
-        all_dom = self.hf_dataset["dominance"] if "dominance" in cols else (self.hf_dataset["EmoDom"] if "EmoDom" in cols else [None] * len(self.hf_dataset))
-        
-        all_transcripts = [None] * len(self.hf_dataset)
-        if self.modality in ["text", "both"]:
-            all_transcripts = self.hf_dataset["transcript"] if "transcript" in cols else (self.hf_dataset["text"] if "text" in cols else ["[EMPTY]"] * len(self.hf_dataset))
+        n = len(self.hf_dataset)
 
-        self.data = []
-        for i in range(len(self.hf_dataset)):
-            # Determine label
+        def first_col(names: list, default=None) -> list:
+            """Return the first column in `names` that exists, else [default]*n."""
+            for name in names:
+                if name in cols:
+                    return self.hf_dataset[name]
+            return [default] * n
+
+        all_labels = first_col(["label"])
+        all_emoclass = first_col(["EmoClass"])
+
+        # VAD columns: support multiple naming conventions across corpora
+        # (e.g. MSPI uses valence/arousal/domination, CMUMOSEI/SAMSEMO use
+        # consensus_*, MSPP uses EmoVal/EmoAct/EmoDom).
+        all_val = first_col(["valence", "consensus_valence", "EmoVal"])
+        all_act = first_col(["arousal", "consensus_arousal", "EmoAct"])
+        all_dom = first_col(["dominance", "domination", "consensus_dominance", "EmoDom"])
+
+        all_transcripts = [None] * n
+        if self.modality in ["text", "both"]:
+            all_transcripts = first_col(["transcript", "text"], default="[EMPTY]")
+
+        # Preextracted feature column is touched per-row (large nested structs);
+        # only grab the whole column when actually needed.
+        all_features = None
+        if not self.uses_raw_audio and self.modality in ["audio", "both"]:
+            if "emotion2vec_features" in cols:
+                all_features = self.hf_dataset["emotion2vec_features"]
+
+        def is_missing(val) -> bool:
+            return val is None or (isinstance(val, float) and math.isnan(val))
+
+        def normalize(val):
+            if is_missing(val):
+                return None
+            return (val - 1) / 6 if dataset_name == "MSPP" else (val - 1) / 4
+
+        for i in range(n):
+            # Label: numeric 'label' column or string 'EmoClass' fallback
             label = all_labels[i]
             if label is None and all_emoclass[i] is not None:
                 label = self.EMOCLASS_TO_LABEL.get(all_emoclass[i], -1)
-            
             if label is None or label < 0 or label > 3:
                 skipped_label_count += 1
                 continue
 
-            # Normalize VAD (Math is done on local variables, not disk objects)
-            def normalize(val):
-                if val is None or (isinstance(val, float) and math.isnan(val)):
-                    return 0.5
-                return (val - 1) / 6 if dataset_name == "MSPP" else (val - 1) / 4
+            raw_v, raw_a, raw_d = all_val[i], all_act[i], all_dom[i]
 
-            v, a, d = normalize(all_val[i]), normalize(all_act[i]), normalize(all_dom[i])
+            # Regression requires all three VAD values present
+            if task_type == "regression":
+                if is_missing(raw_v) or is_missing(raw_a) or is_missing(raw_d):
+                    skipped_vad_count += 1
+                    continue
 
-            if task_type == "regression" and (v == 0.5 and a == 0.5): # Rough check for missing
-                skipped_vad_count += 1
-                continue
+            v_norm = normalize(raw_v)
+            a_norm = normalize(raw_a)
+            d_norm = normalize(raw_d)
 
-            # Store metadata
             sample = {
-                "hf_idx": i,
                 "label": label,
-                "valence": v,
-                "arousal": a,
-                "dominance": d,
+                "valence": 0.5 if v_norm is None else v_norm,
+                "arousal": 0.5 if a_norm is None else a_norm,
+                "dominance": 0.5 if d_norm is None else d_norm,
                 "transcript": all_transcripts[i] or "[EMPTY]",
                 "dataset": dataset_name,
             }
 
-            # If preextracted, we still have to touch the feature column
-            if not self.uses_raw_audio:
-                sample["features"] = self.hf_dataset[i]["emotion2vec_features"][0]["feats"]
+            if self.uses_raw_audio:
+                # Lazy waveform load in __getitem__
+                sample["hf_idx"] = i
+            else:
+                if all_features is None or all_features[i] is None:
+                    continue
+                sample["features"] = all_features[i][0]["feats"]
 
             self.data.append(sample)
+
+        print(f"  Loaded {len(self.data)} samples from {dataset_name}")
+        if skipped_vad_count > 0:
+            print(f"   Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
+        if skipped_label_count > 0:
+            print(f"   Skipped {skipped_label_count} samples with invalid label (None or > 3)")
 
     def cache_encoder_features(self, encoder, device, batch_size=16):
         """

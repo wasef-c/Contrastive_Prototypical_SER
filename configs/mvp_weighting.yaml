@@ -37,9 +37,9 @@ template_config: &template
 
   # Training
   num_epochs: 20
-  batch_size: 18
-  eval_batch_size: 18
-  gradient_accumulation_steps: 10
+  batch_size: 10
+  eval_batch_size: 10
+  gradient_accumulation_steps: 18
   num_workers: 2
   learning_rate: 5e-6
   weight_decay: 1e-4
@@ -82,7 +82,7 @@ experiments:
   #   name: "MSPP_mvp_uniform"
   # 2. VAD prototypicality weighting
 
-  
+
   - <<: *template
     name: "MSPP_mvp_vad_a1"
     use_prototypical_weighting: true
@@ -99,7 +99,7 @@ experiments:
 
   # 2. VAD prototypicality weighting
   - <<: *template
-    name: "MSPP_mvp_vad_a3"
+    name: "MSPP_mvp_vad_a4"
     use_prototypical_weighting: true
     ce_weight_source: "vad"
     prototypical_weighting_alpha: 4.0
