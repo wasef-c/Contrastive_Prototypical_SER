@@ -33,6 +33,7 @@ def vad_collate_fn(batch):
     has_waveform = 'waveform' in batch[0] and batch[0]['waveform'] is not None
     has_transcript = 'transcript' in batch[0]
     has_vad = 'valence' in batch[0]
+    has_difficulty = 'difficulty' in batch[0]
 
     if has_features:
         collated['features'] = []
@@ -43,6 +44,8 @@ def vad_collate_fn(batch):
         collated['valence'] = []
         collated['arousal'] = []
         collated['dominance'] = []
+    if has_difficulty:
+        collated['difficulty'] = []
 
     # Collect waveforms separately for padding
     waveform_list = [] if has_waveform else None
@@ -72,6 +75,9 @@ def vad_collate_fn(batch):
             collated['arousal'].append(arousal)
             collated['dominance'].append(dominance)
 
+        if has_difficulty:
+            collated['difficulty'].append(item['difficulty'])
+
     # Convert to tensors
     if has_features:
         collated['features'] = torch.stack(collated['features'])
@@ -80,6 +86,8 @@ def vad_collate_fn(batch):
         collated['valence'] = torch.tensor(collated['valence'], dtype=torch.float32)
         collated['arousal'] = torch.tensor(collated['arousal'], dtype=torch.float32)
         collated['dominance'] = torch.tensor(collated['dominance'], dtype=torch.float32)
+    if has_difficulty:
+        collated['difficulty'] = torch.tensor(collated['difficulty'], dtype=torch.float32)
 
     collated['label'] = torch.stack(collated['label'])
 

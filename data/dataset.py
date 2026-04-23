@@ -3,12 +3,15 @@
 Simplified emotion dataset loader for cross-corpus experiments
 """
 
+import math
+
+import numpy as np
 import torch
 import torchaudio
-import numpy as np
-from torch.utils.data import Dataset
 from datasets import load_dataset
-import math
+from torch.utils.data import Dataset
+
+from utils.prototypicality import calculate_difficulty
 
 
 class EmotionDataset(Dataset):
@@ -155,11 +158,25 @@ class EmotionDataset(Dataset):
             a_norm = normalize(raw_a)
             d_norm = normalize(raw_d)
 
+            v_val = 0.5 if v_norm is None else v_norm
+            a_val = 0.5 if a_norm is None else a_norm
+            d_val = 0.5 if d_norm is None else d_norm
+
+            # Precompute difficulty once. Static expected_vad means this never
+            # changes across epochs, so per-batch recomputation is wasted work.
+            # Learnable-centroid runs bypass this via `centroid_tracker` in the
+            # training loop and recompute on-graph instead.
+            if self.has_vad and config is not None and getattr(config, 'expected_vad', None) is not None:
+                difficulty = calculate_difficulty(v_val, a_val, d_val, label, config.expected_vad)
+            else:
+                difficulty = 0.0
+
             sample = {
                 "label": label,
-                "valence": 0.5 if v_norm is None else v_norm,
-                "arousal": 0.5 if a_norm is None else a_norm,
-                "dominance": 0.5 if d_norm is None else d_norm,
+                "valence": v_val,
+                "arousal": a_val,
+                "dominance": d_val,
+                "difficulty": difficulty,
                 "transcript": all_transcripts[i] or "[EMPTY]",
                 "dataset": dataset_name,
             }
@@ -250,6 +267,7 @@ class EmotionDataset(Dataset):
             "valence": item["valence"],
             "arousal": item["arousal"],
             "dominance": item["dominance"],
+            "difficulty": item.get("difficulty", 0.0),
             "dataset": item["dataset"],
         }
 

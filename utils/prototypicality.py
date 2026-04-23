@@ -45,41 +45,77 @@ def calculate_difficulty(valence, arousal, dominance, label, expected_vad):
 DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
 
 
+_CENTROID_CACHE: "dict[int, torch.Tensor]" = {}
+
+
+def _centroids_from_dict(expected_vad: dict) -> torch.Tensor:
+    """Build (and cache) a [num_classes, 3] CPU tensor from an expected_vad dict.
+
+    Cached by id(expected_vad) since the dict comes from config and is reused
+    every batch. Avoids rebuilding the tensor on each call.
+
+    Args:
+        expected_vad: dict mapping label (int) to [V, A, D] prototype list.
+
+    Returns:
+        [num_classes, 3] float32 tensor of class centroids.
+    """
+    key = id(expected_vad)
+    cached = _CENTROID_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    num_classes = max(expected_vad.keys()) + 1
+    centroids = torch.zeros(num_classes, 3, dtype=torch.float32)
+    for label, vad in expected_vad.items():
+        centroids[label] = torch.tensor(vad, dtype=torch.float32)
+    _CENTROID_CACHE[key] = centroids
+    return centroids
+
+
 def batch_calculate_difficulty(batch, expected_vad):
     """
-    Calculate difficulty for a batch.
+    Return per-sample difficulty for a batch.
+
+    Fast path: if the batch carries 'difficulty' (precomputed at dataset init),
+    return it directly. Samples with static centroids never need to recompute.
+
+    Fallback (vectorized): compute from VAD + expected_vad. Used when the batch
+    has no precomputed difficulty (e.g. older collate, ad-hoc batches).
 
     Samples from datasets without VAD annotations (CMUMOSEI, SAMSEMO) get
     difficulty=0 (fully prototypical) since their VAD values are fake defaults.
 
     Args:
         batch: dict with 'valence', 'arousal', 'dominance', 'label' tensors
-               and 'dataset' list of corpus name strings
-        expected_vad: dict mapping label → [V, A, D] prototype
+               and 'dataset' list of corpus name strings.
+        expected_vad: dict mapping label -> [V, A, D] prototype.
 
     Returns:
-        tensor: [batch_size] difficulty scores
+        tensor: [batch_size] difficulty scores (CPU float32).
     """
-    batch_size = batch['label'].shape[0]
-    dataset_names = batch.get('dataset', [None] * batch_size)
-    difficulties = []
+    if 'difficulty' in batch and isinstance(batch['difficulty'], torch.Tensor):
+        return batch['difficulty']
 
-    for i in range(batch_size):
-        ds_name = dataset_names[i] if dataset_names else None
-        if ds_name is not None and ds_name not in DATASETS_WITH_VAD:
-            # No real VAD → assign neutral difficulty
-            difficulties.append(0.0)
-            continue
+    labels = batch['label']
+    valence = batch['valence'].float()
+    arousal = batch['arousal'].float()
+    dominance = batch['dominance'].float()
 
-        label = batch['label'][i].item()
-        valence = batch['valence'][i].item()
-        arousal = batch['arousal'][i].item()
-        dominance = batch['dominance'][i].item()
+    centroids = _centroids_from_dict(expected_vad)
+    expected = centroids[labels]
+    actual = torch.stack([valence, arousal, dominance], dim=1)
+    diff = ((actual - expected) ** 2).sum(dim=1).sqrt()
 
-        diff = calculate_difficulty(valence, arousal, dominance, label, expected_vad)
-        difficulties.append(diff)
+    dataset_names = batch.get('dataset', None)
+    if dataset_names is not None:
+        mask = torch.tensor(
+            [n in DATASETS_WITH_VAD for n in dataset_names],
+            dtype=torch.float32,
+        )
+        diff = diff * mask
 
-    return torch.tensor(difficulties, dtype=torch.float32)
+    return torch.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 # Default class prototypes (normalized to 0-1 range)
