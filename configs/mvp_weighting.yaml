@@ -5,8 +5,8 @@
 # Run with: python runner.py --config configs/mvp_weighting.yaml --all
 
 template_config: &template
-  wandb_project: "MVP_Weighting"
-  seeds: [42]
+  wandb_project: "MVP_Weighting_CONFIRM"
+  seeds: [78, 192,3992]
 
   # Task
   task_type: "classification"
@@ -84,25 +84,25 @@ experiments:
 
 
   - <<: *template
-    name: "MSPP_mvp_vad_a1"
+    name: "MSPP_mvp_vad_a2_fr"
     use_prototypical_weighting: true
     ce_weight_source: "vad"
-    prototypical_weighting_alpha: 1.0
+    prototypical_weighting_alpha: 2.0
 
 
-  # 2. VAD prototypicality weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_a3"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    prototypical_weighting_alpha: 3.0
+  # # 2. VAD prototypicality weighting
+  # - <<: *template
+  #   name: "MSPP_mvp_vad_a3"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "vad"
+  #   prototypical_weighting_alpha: 3.0
 
-  # 2. VAD prototypicality weighting
-  - <<: *template
-    name: "MSPP_mvp_vad_a4"
-    use_prototypical_weighting: true
-    ce_weight_source: "vad"
-    prototypical_weighting_alpha: 4.0
+  # # 2. VAD prototypicality weighting
+  # - <<: *template
+  #   name: "MSPP_mvp_vad_a4"
+  #   use_prototypical_weighting: true
+  #   ce_weight_source: "vad"
+  #   prototypical_weighting_alpha: 4.0
 
   # # 3. Cross-modal agreement weighting
   # - <<: *template

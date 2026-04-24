@@ -1075,7 +1075,7 @@ def train(config, datasets=None):
     wandb.define_metric("stage",              step_metric="epoch")
 
     # Early stopping setup
-    early_stopping_patience = getattr(config, 'early_stopping_patience', 10)
+    early_stopping_patience = int(getattr(config, 'early_stopping_patience', 10))
     epochs_without_improvement = 0
 
     # Best model tracking (across both stages)

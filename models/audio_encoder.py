@@ -9,6 +9,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from funasr import AutoModel
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
 
@@ -152,10 +153,7 @@ class Emotion2VecEncoder(nn.Module):
         self.unfreeze_layers = unfreeze_layers
 
         print(f"Loading Emotion2Vec model: {model_name}")
-        from funasr import AutoModel
-        # auto_model = AutoModel(model=model_name)
-        # In models/audio_encoder.py
-        auto_model = AutoModel(model="/home/carolw/links/scratch/modelscope_cache/models/iic/emotion2vec_base")
+        auto_model = AutoModel(model=model_name)
         self.model = auto_model.model  # Emotion2vec nn.Module
 
         self.normalize: bool = self.model.cfg.normalize
