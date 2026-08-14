@@ -7,18 +7,27 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 
 
-def calculate_uar(predictions, labels):
+def calculate_uar(predictions, labels, num_classes=None):
     """
     Calculate Unweighted Average Recall (UAR)
+
+    Averages recall over the classes that actually occur in `labels`. A
+    class absent from the reference has no recall to average, so it is
+    skipped rather than counted as zero.
 
     Args:
         predictions: numpy array of predicted labels
         labels: numpy array of true labels
+        num_classes: optional fixed label set size. Pass it so the
+            confusion matrix keeps a stable row order; without it sklearn
+            sizes the matrix to the labels actually observed, which shifts
+            row indices when a class is missing.
 
     Returns:
         float: UAR score
     """
-    cm = confusion_matrix(labels, predictions)
+    label_set = list(range(num_classes)) if num_classes else None
+    cm = confusion_matrix(labels, predictions, labels=label_set)
     recalls = []
     for i in range(len(cm)):
         if cm[i].sum() > 0:
@@ -26,32 +35,47 @@ def calculate_uar(predictions, labels):
     return np.mean(recalls) if recalls else 0.0
 
 
-def calculate_classification_metrics(predictions, labels):
+def calculate_classification_metrics(predictions, labels, num_classes=None):
     """
     Calculate classification metrics
+
+    Args:
+        predictions: numpy array of predicted labels
+        labels: numpy array of true labels
+        num_classes: size of the label set. Defaults to one past the
+            largest index seen, which is right whenever the top class is
+            represented.
 
     Returns dict with:
         - accuracy
         - uar (unweighted average recall)
         - f1_weighted
-        - per_class_recall
+        - class_{i}_recall for every i in the label set
     """
     predictions = np.array(predictions)
     labels = np.array(labels)
 
+    if num_classes is None:
+        seen = np.concatenate([predictions, labels]) if predictions.size else labels
+        num_classes = int(seen.max()) + 1 if seen.size else 0
+    label_set = list(range(num_classes))
+
     metrics = {
         'accuracy': accuracy_score(labels, predictions),
-        'uar': calculate_uar(predictions, labels),
+        'uar': calculate_uar(predictions, labels, num_classes=num_classes),
         'f1_weighted': f1_score(labels, predictions, average='weighted', zero_division=0),
     }
 
-    # Per-class recall
-    cm = confusion_matrix(labels, predictions)
-    for i in range(len(cm)):
+    # Per-class recall. The explicit `labels` argument keeps row i meaning
+    # class i: without it sklearn sizes the matrix to the observed labels,
+    # so a class missing from both arrays shifts every later row down and
+    # silently reports the wrong class's recall (and drops the last key).
+    cm = confusion_matrix(labels, predictions, labels=label_set)
+    for i in range(num_classes):
         if cm[i].sum() > 0:
             metrics[f'class_{i}_recall'] = cm[i, i] / cm[i].sum()
         else:
-            metrics[f'class_{i}_recall'] = 0.0
+            metrics[f'class_{i}_recall'] = float('nan')
 
     return metrics
 

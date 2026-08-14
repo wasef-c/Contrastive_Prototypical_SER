@@ -31,11 +31,24 @@ def _corpus_key(corpus_name: str, config) -> Tuple[Any, ...]:
     mutate the dataset via cache_encoder_features (which bakes in model-specific
     features and frees raw audio), so those variants cannot be shared with
     experiments that need raw waveforms or a different encoder.
+
+    audio_pooling is part of the key for the same reason: it changes the
+    width of what cache_encoder_features bakes in (768 for mean, 1536 for
+    mean_std, 3072 for mean_std_halves). Without it, a mean-pooled arm
+    running first leaves 768-dim features on the shared dataset and every
+    later arm builds a wider model that is then handed the stale tensors,
+    failing with a shape mismatch in the fusion projection.
     """
     return (
         corpus_name,
         getattr(config, 'audio_encoder_type', 'preextracted'),
         getattr(config, 'audio_model_name', None),
+        getattr(config, 'audio_pooling', 'mean'),
+        # Frame count changes the cached array's shape, so it belongs in
+        # the key for the same reason audio_pooling does. The pooling
+        # module itself (attention vs control) does NOT: it consumes the
+        # cache rather than producing it, so both arms share one cache.
+        getattr(config, 'num_frames', 32),
         getattr(config, 'modality', 'both'),
         getattr(config, 'task_type', 'classification'),
         _needs_raw_audio(config),
@@ -257,6 +270,8 @@ def compute_averaged_results(all_results, config):
 
         for dataset_name in test_datasets:
             accs, uars, f1s = [], [], []
+            # Within-class embedding collapse metrics (aux VAD mechanism study)
+            wvrs, ranks = [], []
 
             for result in all_results:
                 for tr in result["test_results"]:
@@ -264,9 +279,12 @@ def compute_averaged_results(all_results, config):
                         accs.append(tr["results"]["accuracy"])
                         uars.append(tr["results"]["uar"])
                         f1s.append(tr["results"].get("f1_weighted", 0))
+                        if "within_var_ratio" in tr["results"]:
+                            wvrs.append(tr["results"]["within_var_ratio"])
+                            ranks.append(tr["results"]["effective_rank"])
                         break
 
-            averaged["test_results"].append({
+            entry = {
                 "dataset": dataset_name,
                 "accuracy_mean": np.mean(accs),
                 "accuracy_std": np.std(accs),
@@ -274,7 +292,13 @@ def compute_averaged_results(all_results, config):
                 "uar_std": np.std(uars),
                 "f1_mean": np.mean(f1s),
                 "f1_std": np.std(f1s),
-            })
+            }
+            if wvrs:
+                entry["within_var_ratio_mean"] = np.mean(wvrs)
+                entry["within_var_ratio_std"] = np.std(wvrs)
+                entry["effective_rank_mean"] = np.mean(ranks)
+                entry["effective_rank_std"] = np.std(ranks)
+            averaged["test_results"].append(entry)
 
     return averaged
 
@@ -349,14 +373,24 @@ def log_averaged_to_wandb(averaged, config, experiment_name, seeds):
             print(f"  UAR: {tr['uar_mean']:.4f} +/- {tr['uar_std']:.4f}")
 
             prefix = f"AVERAGED_{train_ds}/{train_ds}to{ds}"
-            wandb.log({
+            payload = {
                 f"{prefix}_accuracy_mean": tr["accuracy_mean"],
                 f"{prefix}_accuracy_std": tr["accuracy_std"],
                 f"{prefix}_uar_mean": tr["uar_mean"],
                 f"{prefix}_uar_std": tr["uar_std"],
                 f"{prefix}_f1_mean": tr["f1_mean"],
                 f"{prefix}_f1_std": tr["f1_std"],
-            })
+            }
+            if "within_var_ratio_mean" in tr:
+                print(f"  within_var_ratio: {tr['within_var_ratio_mean']:.4f} "
+                      f"+/- {tr['within_var_ratio_std']:.4f}")
+                print(f"  embed_rank: {tr['effective_rank_mean']:.1f} "
+                      f"+/- {tr['effective_rank_std']:.1f}")
+                payload[f"{prefix}_within_var_ratio_mean"] = tr["within_var_ratio_mean"]
+                payload[f"{prefix}_within_var_ratio_std"] = tr["within_var_ratio_std"]
+                payload[f"{prefix}_embed_rank_mean"] = tr["effective_rank_mean"]
+                payload[f"{prefix}_embed_rank_std"] = tr["effective_rank_std"]
+            wandb.log(payload)
 
     wandb.finish()
 

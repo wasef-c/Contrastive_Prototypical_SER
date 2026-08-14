@@ -3,3 +3,9 @@ wandb/
 CLAUDE.md 
 __pycache__/
 *.pt
+checkpoints/
+motivation/
+*.csv
+scripts/
+analysis/
+.*

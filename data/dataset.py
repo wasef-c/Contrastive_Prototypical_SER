@@ -4,6 +4,8 @@ Simplified emotion dataset loader for cross-corpus experiments
 """
 
 import math
+import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,7 +13,45 @@ import torchaudio
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
+from utils.frame_cache import (
+    finalize_frame_cache,
+    load_frame_cache,
+    resample_frames,
+    write_frame_cache,
+)
 from utils.prototypicality import calculate_difficulty
+
+
+AUDIO_FEATURE_CACHE_DIR = Path(
+    os.environ.get("AUDIO_FEATURE_CACHE_DIR", ".flash/audio_feature_cache")
+)
+
+# Corpora whose released activation annotations run calm-high rather than
+# active-high, and so must be flipped to be comparable with the others.
+# See orient_arousal in _load_data for the evidence behind this list.
+AROUSAL_REVERSED_CORPORA = {"MSPI"}
+
+
+def _encoder_cache_path(dataset_name: str, encoder_type: str, model_name: str,
+                        pooling: str = "mean") -> Path:
+    """Deterministic per-(dataset, encoder) cache filename.
+
+    Args:
+        dataset_name: e.g. "MSPI".
+        encoder_type: e.g. "emotion2vec".
+        model_name: HF or local model id, e.g. "iic/emotion2vec_base".
+        pooling: temporal pooling mode. Part of the key because different
+            modes produce different feature widths; without it a
+            mean_std run would silently load stale 768-dim features.
+
+    Returns:
+        Absolute Path under AUDIO_FEATURE_CACHE_DIR.
+    """
+    model_slug = model_name.replace("/", "__").replace(":", "_")
+    if pooling and pooling != "mean":
+        model_slug = f"{model_slug}__{pooling}"
+    fname = f"{dataset_name}__{encoder_type}__{model_slug}.pt"
+    return (AUDIO_FEATURE_CACHE_DIR / fname).resolve()
 
 
 class EmotionDataset(Dataset):
@@ -68,6 +108,8 @@ class EmotionDataset(Dataset):
         self.modality = getattr(config, 'modality', 'both') if config else 'both'
         self.audio_encoder_type = getattr(config, 'audio_encoder_type', 'preextracted') if config else 'preextracted'
 
+        self.frame_cache = None
+        self.frame_durations = None
         self.has_vad = dataset_name in self.DATASETS_WITH_VAD
 
         # For regression, only datasets with VAD are valid
@@ -111,12 +153,23 @@ class EmotionDataset(Dataset):
         all_labels = first_col(["label"])
         all_emoclass = first_col(["EmoClass"])
 
+        # Collapse to neutral vs emotional when the arm is a presence detector.
+        binary_neutral = bool(getattr(config, "binary_neutral", False))
+
         # VAD columns: support multiple naming conventions across corpora
         # (e.g. MSPI uses valence/arousal/domination, CMUMOSEI/SAMSEMO use
         # consensus_*, MSPP uses EmoVal/EmoAct/EmoDom).
         all_val = first_col(["valence", "consensus_valence", "EmoVal"])
         all_act = first_col(["arousal", "consensus_arousal", "EmoAct"])
         all_dom = first_col(["dominance", "domination", "consensus_dominance", "EmoDom"])
+
+        # Speaker identity, named differently per corpus: MSP-Podcast uses
+        # SpkrID, IEMOCAP and MSP-Improv use speakerID. Read defensively and
+        # fall back to a per-row unique id so that a corpus without speaker
+        # labels degrades to "every utterance is its own speaker" rather
+        # than collapsing every row into one bogus speaker.
+        all_speakers = first_col(["SpkrID", "speakerID", "speaker_id", "speaker"],
+                                 default=None)
 
         all_transcripts = [None] * n
         if self.modality in ["text", "both"]:
@@ -137,6 +190,42 @@ class EmotionDataset(Dataset):
                 return None
             return (val - 1) / 6 if dataset_name == "MSPP" else (val - 1) / 4
 
+        def orient_arousal(val):
+            """Put arousal on a shared active-high scale across corpora.
+
+            As distributed to us, MSPI arousal runs calm-high: its
+            per-class means order angry (2.76) < happy (3.07) < sad (3.72)
+            < neutral (3.86), an exact reversal of IEMOCAP's sad <
+            neutral < happy < angry. The reversal is specific to arousal.
+            Valence (happy 4.05 high, angry 1.98 low) and
+            consensus_dominance (angry 3.56 high, sad 2.76 low) both order
+            correctly, which rules out a shuffled or mis-mapped column,
+            and arousal, arousal_norm and consensus_arousal all carry the
+            same reversal. Listening to samples labelled high-arousal
+            confirms they sound calm.
+
+            Whether this originates in the corpus release or in the
+            cairocode HF merge is not established. The standard SAM
+            convention is 1 = calm, 5 = excited, and no statement of a
+            reversed scale was found in the MSP-IMPROV paper, so a merge
+            artifact is the more likely cause. The correction is applied
+            either way because cross-corpus arousal comparisons are
+            meaningless without it.
+
+            Training never touches these values (MSP-Podcast is the only
+            training corpus), so no reported UAR depends on this. Any
+            cross-corpus analysis that compares arousal does.
+
+            Args:
+                val: raw arousal on the corpus's own 1-5 scale.
+
+            Returns:
+                Arousal reoriented so higher means more activated.
+            """
+            if is_missing(val) or dataset_name not in AROUSAL_REVERSED_CORPORA:
+                return val
+            return 6.0 - val
+
         for i in range(n):
             # Label: numeric 'label' column or string 'EmoClass' fallback
             label = all_labels[i]
@@ -155,7 +244,7 @@ class EmotionDataset(Dataset):
                     continue
 
             v_norm = normalize(raw_v)
-            a_norm = normalize(raw_a)
+            a_norm = normalize(orient_arousal(raw_a))
             d_norm = normalize(raw_d)
 
             v_val = 0.5 if v_norm is None else v_norm
@@ -171,14 +260,26 @@ class EmotionDataset(Dataset):
             else:
                 difficulty = 0.0
 
+            # Binary neutral-vs-emotional target. Collapsing happens after
+            # difficulty is computed, since expected_vad is keyed by the
+            # original 4-class label. The 4-class label is kept alongside so
+            # downstream analysis can still slice by emotion.
+            out_label = label
+            if binary_neutral:
+                out_label = 0 if label == 0 else 1
+
             sample = {
-                "label": label,
+                "label": out_label,
+                "label4": label,
                 "valence": v_val,
                 "arousal": a_val,
                 "dominance": d_val,
                 "difficulty": difficulty,
                 "transcript": all_transcripts[i] or "[EMPTY]",
                 "dataset": dataset_name,
+                "speaker": (f"{dataset_name}:{all_speakers[i]}"
+                            if all_speakers[i] is not None
+                            else f"{dataset_name}:row{i}"),
             }
 
             if self.uses_raw_audio:
@@ -203,7 +304,12 @@ class EmotionDataset(Dataset):
         from lazy waveform loading to cached feature mode. After caching, each
         epoch is as fast as preextracted features.
 
-        Only useful when the encoder is frozen (features don't change between epochs).
+        Persists the features to disk under AUDIO_FEATURE_CACHE_DIR keyed by
+        (dataset_name, encoder_type, model_name) so subsequent runs skip the
+        forward pass entirely. Cache is invalidated by sample-count mismatch.
+
+        Only useful when the encoder is frozen (features don't change between
+        epochs / runs).
 
         Args:
             encoder: Audio encoder module (Emotion2VecEncoder or Wav2Vec2Encoder)
@@ -213,28 +319,75 @@ class EmotionDataset(Dataset):
         if not self.uses_raw_audio:
             return  # Already using preextracted features
 
-        print(f"  Caching {len(self.data)} encoder features for {self.dataset_name}...")
-        encoder.eval()
+        # Frame-level mode keeps the time axis. Features go to a memmapped
+        # file rather than an in-RAM tensor, because [N, T, 768] does not
+        # fit: the pooled dup8 cache at 6144 dims already triggered an OOM.
+        if getattr(self.config, "audio_pooling", "mean") == "frames":
+            self._cache_frame_features(encoder, device, batch_size)
+            return
 
-        from data.collate import vad_collate_fn
-        from torch.utils.data import DataLoader
-
-        temp_loader = DataLoader(
-            self, batch_size=batch_size, shuffle=False,
-            collate_fn=vad_collate_fn, num_workers=0,
+        cache_path = _encoder_cache_path(
+            self.dataset_name,
+            getattr(self.config, "audio_encoder_type", "unknown"),
+            getattr(self.config, "audio_model_name", "unknown"),
+            getattr(self.config, "audio_pooling", "mean"),
         )
+        AUDIO_FEATURE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        all_features = []
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(temp_loader):
-                waveforms = batch['waveforms'].to(device)
-                mask = batch['audio_attention_mask'].to(device)
-                feats = encoder(waveforms, mask)  # [B, 768]
-                all_features.append(feats.cpu())
-                if (batch_idx + 1) % 100 == 0:
-                    print(f"    {(batch_idx+1)*batch_size}/{len(self.data)} cached...")
+        all_features = None
+        if cache_path.exists():
+            try:
+                payload = torch.load(cache_path, map_location="cpu")
+                cached = payload["features"]
+                if cached.shape[0] == len(self.data):
+                    all_features = cached
+                    print(f"  Loaded cached features for {self.dataset_name} "
+                          f"from {cache_path} ({tuple(cached.shape)})")
+                else:
+                    print(f"  Cache size mismatch for {self.dataset_name} "
+                          f"(cache {cached.shape[0]} vs data {len(self.data)}), "
+                          f"recomputing.")
+            except Exception as e:
+                print(f"  Failed to load cache {cache_path}: {e}. Recomputing.")
 
-        all_features = torch.cat(all_features, dim=0)  # [N, 768]
+        if all_features is None:
+            print(f"  Caching {len(self.data)} encoder features for {self.dataset_name}...")
+            encoder.eval()
+
+            from data.collate import vad_collate_fn
+            from torch.utils.data import DataLoader
+
+            temp_loader = DataLoader(
+                self, batch_size=batch_size, shuffle=False,
+                collate_fn=vad_collate_fn, num_workers=0,
+            )
+
+            chunks = []
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(temp_loader):
+                    waveforms = batch['waveforms'].to(device)
+                    mask = batch['audio_attention_mask'].to(device)
+                    feats = encoder(waveforms, mask)  # [B, 768]
+                    chunks.append(feats.cpu())
+                    if (batch_idx + 1) % 100 == 0:
+                        print(f"    {(batch_idx+1)*batch_size}/{len(self.data)} cached...")
+
+            all_features = torch.cat(chunks, dim=0)  # [N, 768]
+
+            tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            torch.save(
+                {
+                    "features": all_features,
+                    "n_samples": all_features.shape[0],
+                    "encoder_type": getattr(self.config, "audio_encoder_type", "unknown"),
+                    "model_name": getattr(self.config, "audio_model_name", "unknown"),
+                    "dataset_name": self.dataset_name,
+                },
+                tmp_path,
+            )
+            os.replace(tmp_path, cache_path)
+            print(f"  Cached {len(self.data)} features ({all_features.shape}) "
+                  f"to {cache_path}")
 
         # Replace lazy loading with cached features
         for i, sample in enumerate(self.data):
@@ -243,7 +396,72 @@ class EmotionDataset(Dataset):
 
         self.uses_raw_audio = False
         self.hf_dataset = None  # Free HF dataset memory
-        print(f"  Cached {len(self.data)} features ({all_features.shape})")
+
+    def _cache_frame_features(self, encoder, device, batch_size=16):
+        """Cache frame-level features to a memmapped file.
+
+        Each utterance is resampled to a fixed frame count so the array is
+        rectangular and can be memory mapped. Only the rows a batch touches
+        are ever resident, which is what makes keeping the time axis
+        affordable at all.
+
+        Args:
+            encoder: audio encoder configured with pooling="frames".
+            device: device to run the encoder on.
+            batch_size: extraction batch size.
+        """
+        model_name = getattr(self.config, "audio_model_name", "unknown")
+        n_frames = int(getattr(self.config, "num_frames", 32))
+        n = len(self.data)
+
+        existing = load_frame_cache(self.dataset_name, model_name, n_frames,
+                                    expected_n=n)
+        if existing is None:
+            print(f"  Extracting {n} frame-level features for "
+                  f"{self.dataset_name} (T={n_frames})...")
+            arr, tmp_path, meta_path = write_frame_cache(
+                self.dataset_name, model_name, n_frames, n,
+            )
+            durations = np.zeros(n, dtype=np.int32)
+
+            from torch.utils.data import DataLoader
+            from data.collate import vad_collate_fn
+            loader = DataLoader(self, batch_size=batch_size, shuffle=False,
+                                collate_fn=vad_collate_fn, num_workers=0)
+            encoder.eval()
+            pos = 0
+            with torch.no_grad():
+                for bi, batch in enumerate(loader):
+                    feats = encoder(
+                        batch["waveforms"].to(device),
+                        batch["audio_attention_mask"].to(device),
+                    )                                    # [B, T', D]
+                    # Padding was zeroed by the encoder, so a row that is
+                    # entirely zero is padding.
+                    real = (feats.abs().sum(dim=-1) > 0).sum(dim=1)
+                    for j in range(feats.shape[0]):
+                        durations[pos] = int(real[j])
+                        arr[pos] = resample_frames(
+                            feats[j], int(real[j]), n_frames,
+                        ).cpu().numpy().astype(np.float16)
+                        pos += 1
+                    if (bi + 1) % 100 == 0:
+                        print(f"    {pos}/{n} extracted...")
+            path = finalize_frame_cache(arr, tmp_path, meta_path,
+                                        self.dataset_name, model_name,
+                                        n_frames, durations)
+            print(f"  Cached frame features to {path}")
+            existing = load_frame_cache(self.dataset_name, model_name,
+                                        n_frames, expected_n=n)
+
+        self.frame_cache, self.frame_durations = existing
+        print(f"  Frame cache ready: {self.frame_cache.shape} "
+              f"(memmapped, fp16)")
+        for i, sample in enumerate(self.data):
+            sample.pop("hf_idx", None)
+            sample["frame_idx"] = i
+        self.uses_raw_audio = False
+        self.hf_dataset = None
 
     def __len__(self):
         return len(self.data)
@@ -269,10 +487,25 @@ class EmotionDataset(Dataset):
             "dominance": item["dominance"],
             "difficulty": item.get("difficulty", 0.0),
             "dataset": item["dataset"],
+            "speaker": item.get("speaker", "unknown"),
+            "label4": torch.tensor(item.get("label4", item["label"]), dtype=torch.long),
+            # Position in self.data. Lets training-time trackers accumulate
+            # per-sample statistics (e.g. an EMA of model confidence) across
+            # epochs. Subset passes through the original index, so this stays
+            # valid under a train/val split.
+            "sample_index": idx,
         }
 
+        # Frame-level: read one row from the memmap. Only this row is
+        # paged in, so RAM stays flat regardless of corpus size.
+        if (self.modality in ["audio", "both"]
+                and getattr(self, "frame_cache", None) is not None
+                and item.get("frame_idx") is not None):
+            row = np.asarray(self.frame_cache[item["frame_idx"]])
+            result["features"] = torch.from_numpy(row).float()
+
         # Add audio features (preextracted mode)
-        if self.modality in ["audio", "both"] and item.get("features") is not None:
+        elif self.modality in ["audio", "both"] and item.get("features") is not None:
             features = item["features"]
             if not isinstance(features, torch.Tensor):
                 features = torch.tensor(features, dtype=torch.float32)
@@ -345,7 +578,11 @@ class MultiCorpusDataset(Dataset):
         import bisect
         ds_idx = bisect.bisect_right(self._cumulative, idx) - 1
         local_idx = idx - self._cumulative[ds_idx]
-        return self.datasets[ds_idx][local_idx]
+        result = self.datasets[ds_idx][local_idx]
+        # Overwrite the sub-dataset's local index with the global one so
+        # per-sample trackers key on a unique id across corpora.
+        result["sample_index"] = idx
+        return result
 
 
 def create_datasets(config):

@@ -34,6 +34,8 @@ def vad_collate_fn(batch):
     has_transcript = 'transcript' in batch[0]
     has_vad = 'valence' in batch[0]
     has_difficulty = 'difficulty' in batch[0]
+    has_speaker = 'speaker' in batch[0]
+    has_label4 = 'label4' in batch[0]
 
     if has_features:
         collated['features'] = []
@@ -46,6 +48,13 @@ def vad_collate_fn(batch):
         collated['dominance'] = []
     if has_difficulty:
         collated['difficulty'] = []
+    if has_speaker:
+        collated['speaker'] = []
+    if has_label4:
+        collated['label4'] = []
+    has_sample_index = 'sample_index' in batch[0]
+    if has_sample_index:
+        collated['sample_index'] = []
 
     # Collect waveforms separately for padding
     waveform_list = [] if has_waveform else None
@@ -77,6 +86,12 @@ def vad_collate_fn(batch):
 
         if has_difficulty:
             collated['difficulty'].append(item['difficulty'])
+        if has_speaker:
+            collated['speaker'].append(item['speaker'])
+        if has_label4:
+            collated['label4'].append(item['label4'])
+        if has_sample_index:
+            collated['sample_index'].append(item['sample_index'])
 
     # Convert to tensors
     if has_features:
@@ -88,8 +103,14 @@ def vad_collate_fn(batch):
         collated['dominance'] = torch.tensor(collated['dominance'], dtype=torch.float32)
     if has_difficulty:
         collated['difficulty'] = torch.tensor(collated['difficulty'], dtype=torch.float32)
+    if has_sample_index:
+        collated['sample_index'] = torch.tensor(
+            collated['sample_index'], dtype=torch.long,
+        )
 
     collated['label'] = torch.stack(collated['label'])
+    if has_label4:
+        collated['label4'] = torch.stack(collated['label4'])
 
     # Pad waveforms to max length in batch
     if has_waveform and waveform_list:

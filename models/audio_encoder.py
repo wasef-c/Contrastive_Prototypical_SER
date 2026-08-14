@@ -4,6 +4,7 @@ Audio encoders: Wav2Vec2 and Emotion2Vec with optional partial unfreezing.
 Both mirror the FrozenBERTEncoder pattern from models/encoder.py.
 """
 
+import re
 from typing import List, Optional
 
 import torch
@@ -141,23 +142,49 @@ class Emotion2VecEncoder(nn.Module):
         self,
         model_name: str = "iic/emotion2vec_base",
         unfreeze_layers: int = 0,
+        pooling: str = "mean",
     ):
         """
         Args:
             model_name: FunASR model name or local path (default: iic/emotion2vec_base).
             unfreeze_layers: Number of top transformer blocks to unfreeze.
-                             0 = fully frozen. Targets model.blocks[-N:].
+                0 = fully frozen. Targets model.blocks[-N:].
+            pooling: temporal pooling mode. "mean" (768), "mean_std"
+                (1536) or "mean_std_halves" (3072). Richer modes keep a
+                fixed output size per utterance, so the feature cache and
+                training speed are unaffected.
         """
         super().__init__()
 
         self.unfreeze_layers = unfreeze_layers
+        fixed = {"mean": 1, "mean_std": 2, "mean_std_halves": 4}
+        # "frames" keeps the time axis: forward returns [B, T, D] and a
+        # downstream module (e.g. AttentionPool) does the pooling. Every
+        # other mode collapses time inside this class.
+        if pooling == "frames":
+            pool_mult = 1
+        elif pooling in fixed:
+            pool_mult = fixed[pooling]
+        elif re.fullmatch(r"(seg|dup)([0-9]+)", pooling or ""):
+            pool_mult = int(re.fullmatch(r"(seg|dup)([0-9]+)", pooling).group(2))
+            if pool_mult < 1:
+                raise ValueError(f"pooling {pooling}: K must be >= 1")
+        else:
+            raise ValueError(
+                f"unknown pooling mode: {pooling}. Use mean, mean_std, "
+                f"mean_std_halves, seg<K>, dup<K> or frames."
+            )
+        self.pooling = pooling
 
         print(f"Loading Emotion2Vec model: {model_name}")
         auto_model = AutoModel(model=model_name)
         self.model = auto_model.model  # Emotion2vec nn.Module
 
         self.normalize: bool = self.model.cfg.normalize
-        self.output_dim: int = 768
+        self.output_dim: int = 768 * pool_mult
+        self.returns_frames: bool = (pooling == "frames")
+        if pooling != "mean":
+            print(f"  Temporal pooling '{pooling}': output_dim {self.output_dim}")
 
         # Freeze all parameters first
         for param in self.model.parameters():
@@ -254,7 +281,24 @@ class Emotion2VecEncoder(nn.Module):
         waveforms: torch.Tensor,
         padding_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Run extract_features and mean-pool the frame-level output."""
+        """Run extract_features and pool the frame-level output over time.
+
+        Mean pooling collapses an utterance to one vector and discards
+        every temporal property with it. Two happy utterances, one
+        building from calm to elated and one steadily warm, have nearly
+        identical means and completely different trajectories, so no loss
+        function downstream can tell them apart. The richer modes append
+        statistics that survive pooling:
+
+            mean              [768]   the original behaviour
+            mean_std          [1536]  + per-dimension variation over time,
+                                      i.e. how much the signal moves
+            mean_std_halves   [3072]  + first-half and second-half means,
+                                      which capture direction of change
+
+        All modes return a fixed-size vector per utterance, so the frozen
+        encoder cache still works and training speed is unchanged.
+        """
         res = self.model.extract_features(
             waveforms,
             padding_mask=padding_mask,
@@ -265,9 +309,77 @@ class Emotion2VecEncoder(nn.Module):
         frame_pm = res["padding_mask"]    # [B, T'] True=pad, or None
 
         if frame_pm is not None and frame_pm.any():
-            real_mask = (~frame_pm).unsqueeze(-1).float()   # [B, T', 1]
-            return (x * real_mask).sum(dim=1) / real_mask.sum(dim=1).clamp(min=1)
-        return x.mean(dim=1)
+            mask = (~frame_pm).unsqueeze(-1).float()        # [B, T', 1]
+        else:
+            mask = torch.ones(x.shape[0], x.shape[1], 1,
+                              device=x.device, dtype=x.dtype)
+
+        if self.pooling == "frames":
+            # Zero the padded positions so a downstream mask can be
+            # recovered from the frames themselves if needed.
+            return x * mask
+        return self._pool(x, mask)
+
+    def _pool(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Apply the configured temporal pooling to masked frame features.
+
+        Args:
+            x: [B, T, D] frame-level features.
+            mask: [B, T, 1] 1.0 for real frames, 0.0 for padding.
+
+        Returns:
+            [B, D * k] pooled features, k set by the pooling mode.
+        """
+        lengths = mask.sum(dim=1).clamp(min=1)              # [B, 1]
+        mean = (x * mask).sum(dim=1) / lengths              # [B, D]
+        if self.pooling == "mean":
+            return mean
+
+        # dupK: the mean repeated K times. Same width and therefore the
+        # same number of downstream parameters as segK or the mean_std
+        # family, but every extra number is an exact copy of one already
+        # present, so it carries no information. This is the capacity
+        # control: if dupK matches a real temporal mode, that mode's gain
+        # came from a wider fusion layer rather than from what the extra
+        # dimensions contain.
+        if self.pooling.startswith("dup"):
+            return mean.repeat(1, int(self.pooling[3:]))
+
+        # segK: split the real frames of each utterance into K equal-time
+        # segments and mean-pool within each. Unlike std, which only says
+        # how much the signal moved, this preserves the shape of the
+        # trajectory: rise, plateau, fall are distinguishable.
+        if self.pooling.startswith("seg"):
+            k = int(self.pooling[3:])
+            t = x.shape[1]
+            idx = torch.arange(t, device=x.device).view(1, t, 1).float()
+            # Segment boundaries are per-sample, since utterances differ in
+            # length and padding must not shift the split points.
+            edges = lengths.view(-1, 1, 1) * (
+                torch.arange(k + 1, device=x.device).view(1, 1, k + 1) / k
+            )                                                # [B, 1, k+1]
+            segs = []
+            for j in range(k):
+                sel = mask * ((idx >= edges[:, :, j:j + 1])
+                              & (idx < edges[:, :, j + 1:j + 2])).float()
+                segs.append((x * sel).sum(dim=1) / sel.sum(dim=1).clamp(min=1))
+            return torch.cat(segs, dim=1)
+
+        var = ((x - mean.unsqueeze(1)) ** 2 * mask).sum(dim=1) / lengths
+        std = (var + 1e-6).sqrt()                           # [B, D]
+        if self.pooling == "mean_std":
+            return torch.cat([mean, std], dim=1)
+
+        # mean_std_halves: split real frames down the middle per sample so
+        # direction of change is representable, not just magnitude.
+        t = x.shape[1]
+        idx = torch.arange(t, device=x.device).view(1, t, 1)
+        half = (lengths.view(-1, 1, 1) / 2.0)
+        first = mask * (idx < half).float()
+        second = mask * (idx >= half).float()
+        m1 = (x * first).sum(dim=1) / first.sum(dim=1).clamp(min=1)
+        m2 = (x * second).sum(dim=1) / second.sum(dim=1).clamp(min=1)
+        return torch.cat([mean, std, m1, m2], dim=1)
 
     def get_audio_params(self) -> List[torch.nn.Parameter]:
         """Return only the unfrozen parameters (for differential LR optimizer)."""
