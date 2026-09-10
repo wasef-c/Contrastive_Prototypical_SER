@@ -1,0 +1,1324 @@
+# Is the class weighting pushing the decision boundary off neutral?
+#
+# THE OBSERVATION. Both corpora are UNDER-predicted for neutral by the no-aux
+# baseline: IEMOCAP true 38.0 percent against 30.9 predicted, SAMSEMO 43.9
+# against 36.7. The prototypicality head then pushes further in the same
+# direction, to 26.8 and 35.0. So the head is not correcting an over-prediction
+# of neutral, it is compounding an existing under-prediction, and the extra
+# mass lands mostly on sad, whose VAD centroid is the closest to neutral's
+# (euclidean 0.16, against 0.29 for happy and 0.35 for angry).
+#
+# WHY IT MATTERS. The ranking improvement is real but the decisions do not
+# capture it. On the binary neutral-against-emotional task the aux arm gains
+# only +0.56 points at argmax on IEMOCAP and LOSES 0.18 on SAMSEMO, while at
+# the best possible threshold it gains +0.94 and +0.31. The whole SAMSEMO
+# deficit is threshold placement, not ranking. If inverse-frequency weighting
+# is what puts the boundary in the wrong place, softening it should let argmax
+# land nearer the optimum.
+#
+# WHAT TO EXPECT. UAR is macro-averaged, so weakening the weighting will
+# predict minority classes less and UAR will probably fall in ABSOLUTE terms;
+# weighted F1 should rise for the same reason. That is not the question. The
+# question is whether the aux-minus-base GAP stops being undercut at the
+# decision level, and whether neutral_auc, which is threshold-free and should
+# be largely indifferent to class weighting, holds up.
+#
+# One seed each. Read the direction and rough size, nothing finer.
+
+template_config: &template
+  wandb_project: "MVP_ClassWeight"
+  seeds: [42]
+
+  # Task
+  task_type: "classification"
+  num_classes: 4
+
+  # Model
+  modality: "both"
+  audio_dim: 768
+  text_model_name: "bert-base-uncased"
+  text_max_length: 128
+  hidden_dim: 1024
+  dropout: 0.1
+
+  # Encoders. Frozen for screening, so frame features are read from the
+  # existing cache and no extraction runs.
+  audio_encoder_type: "emotion2vec"
+  audio_model_name: "iic/emotion2vec_base"
+  unfreeze_audio_layers: 0
+  audio_learning_rate: 1e-5
+  max_audio_seconds: 10
+  unfreeze_bert_layers: 0
+  bert_learning_rate: 2e-5
+
+  # Pooling
+  audio_pooling: "frames"
+  num_frames: 32
+  num_attn_heads_pool: 4
+  attn_pool_hidden: 256
+  use_mean_pool_control: false
+
+  # Fusion
+  fusion_type: "cross_attention"
+  fusion_hidden_dim: 1024
+  num_attention_heads: 8
+
+  # Training. Validation is not used for model selection; the reported model
+  # is the SWA average of the last five epochs.
+  num_epochs: 8
+  batch_size: 16
+  eval_batch_size: 16
+  gradient_accumulation_steps: 2
+  num_workers: 2
+  learning_rate: 5e-6
+  weight_decay: 1e-4
+  val_split: 0.25
+  use_early_stopping: false
+  model_selection: swa_last_n
+  swa_last_n: 3
+  class_weight_mode: inverse_freq
+  save_predictions: true
+  train_subsample_frac: 1.0
+  use_length_bucketing: true
+  length_bucket_window: 50
+
+  # Defaults: everything off
+  use_prototypical_weighting: false
+  use_prototypical_label_smoothing: false
+  use_contrastive: false
+  use_domain_adversarial: false
+  use_modality_adversarial: false
+  use_prototypical_adversarial: false
+  use_multiview_prototypicality: false
+  use_memory_bank: false
+  use_cross_modal_projection: false
+  use_two_stage_training: false
+  use_proto_predictor: false
+  proto_predictor_hidden_dim: 0
+  proto_target: "residual"
+  proto_metric: "mahalanobis"
+  proto_predictor_weight: 1.0
+  proto_predictor_shuffle: false
+  use_proto_dist_logits: false
+  proto_dist_permute: false
+  proto_centroid_consensus_q: 0.0
+  proto_dist_alpha_min: 0.0
+  use_vadmix: false
+  use_vrex: false
+  use_curriculum_learning: false
+  use_corpus_balanced_sampler: false
+  use_hierarchical_head: false
+  use_proto_atyp_split: false
+
+  # Auxiliary head defaults
+  use_annotator_meta: true
+  use_aux_vad_cluster: false
+  aux_vad_task: "cluster"
+  aux_vad_cluster_scope: "per_class"
+  aux_vad_clusters_per_class: 2
+  aux_vad_cluster_weight: 0.2
+  aux_vad_cluster_init: "random"
+  aux_vad_head_depth: 1
+  aux_vad_subtype_dim: 16
+  aux_vad_agreement_weight: false
+  aux_vad_shuffle: false
+
+  train_dataset: ["MSPP"]
+  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+
+  # MSPI centroids (used as prototypes elsewhere; harmless when unused)
+  expected_vad:
+    0: [0.4895, 0.4885, 0.5267]
+    1: [0.6369, 0.6091, 0.6089]
+    2: [0.3567, 0.3964, 0.4427]
+    3: [0.2475, 0.7317, 0.7516]
+
+
+
+experiments:
+  - <<: *template
+    name: "cw_sqrt_base"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "cw_sqrt_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "cw_none_base"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "none"
+
+  - <<: *template
+    name: "cw_none_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "none"
+
+  # Headline pair at sqrt_inverse_freq, seeds 4 more to reach five. Seed 42
+  # already exists as cw_sqrt_base / cw_sqrt_res and is not repeated, since the
+  # runner has no skip-completed logic.
+  #
+  # At seed 42 this weighting moved every gap in the right direction at once:
+  # IEMOCAP neutral_auc +1.18 -> +1.54, UAR +0.21 -> +1.09, and weighted F1
+  # -0.97 -> +0.53, a sign reversal. The mechanism is unchanged; only the
+  # starting point moved. Under inverse_freq the baseline already
+  # under-predicts neutral (33.1 percent against a true 38.0), so the head's
+  # push away from neutral overshoots into sad. Under sqrt the baseline
+  # over-predicts (43.5) and the same push lands at 37.9, within 0.1 of truth.
+  #
+  # Absolute UAR is LOWER here than under inverse_freq (61.49 against 62.32 on
+  # IEMOCAP) and absolute neutral_auc dips slightly (80.76 against 81.09). The
+  # trade is a little headline performance for a larger, cleaner effect with no
+  # weighted-F1 penalty. Five seeds decide whether the seed-42 pattern is real.
+  - <<: *template
+    name: "cw_sqrt_base_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "cw_sqrt_res_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Capacity-matched placebo at the headline setting. Identical to cw_sqrt_res
+  # in every respect except proto_predictor_shuffle, which permutes the aux
+  # target within the batch: same head, same parameter count, same gradient
+  # path, same target marginal, only the sample-to-target pairing destroyed.
+  #
+  # This is the comparison the specificity claim rests on. It is run at
+  # sqrt_inverse_freq because that is now the headline weighting, and because
+  # under inverse_freq the placebo sat significantly BELOW baseline on IEMOCAP
+  # (-0.418, 0/5, p=0.019). If that holds here the res-ctrl gap is wider than
+  # res-base; if the placebo is inert instead, then part of what looked like
+  # mechanism at inverse_freq was the placebo being dragged down, and res-ctrl
+  # measured here is the honest number. Either outcome is reportable, but the
+  # grid of hyperparameter sensitivity runs should be built on whichever it is.
+  - <<: *template
+    name: "cw_sqrt_ctrl"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Sensitivity cells around the headline configuration ---------------
+  # Both vary only the auxiliary head, so the paired baseline is the existing
+  # five-seed cw_sqrt_base and is not retrained. Three seeds each, drawn from
+  # the headline five so the pairing is exact. Judged on UAR, with neutral_auc
+  # reported alongside.
+
+  # Does the effect need class-covariance whitening? With target 'residual',
+  # proto_metric euclidean sets _proto_whiten to None, so the target becomes
+  # the raw VAD offset from the class centre rather than the whitened one. If
+  # the gain survives, the claim is about the residual idea; if it collapses,
+  # the claim is about covariance structure. Either is reportable, but they
+  # are different papers.
+  - <<: *template
+    name: "sens_euclid_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_metric: "euclidean"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Does the head have to be linear? Every result so far uses hidden_dim 0, a
+  # bare Linear from the fused representation to the target. A hidden layer
+  # adds capacity and nonlinearity; paired with the shuffled placebo this
+  # separates "the target carries information" from "the head is big enough
+  # to matter".
+  - <<: *template
+    name: "sens_hidden256_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 256
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Raw VAD as the auxiliary target. The residual is an affine function of VAD
+  # given the class, and the class is exactly what the main head computes, so
+  # "prototypicality" may be doing no work beyond VAD multi-task learning.
+  # This is the direct test. Same head, same output width (3), same loss
+  # weight; the target is the sample's VAD with no centroid subtraction and no
+  # whitening. Five seeds because the answer decides what the paper claims:
+  # if raw VAD is null the prototypicality framing stands, if it matches then
+  # the honest title is about VAD auxiliary supervision.
+  - <<: *template
+    name: "sens_rawvad_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_target: "rawvad"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Shuffled control for the hidden-256 cell. That cell changes head capacity,
+  # which is the one thing the placebo exists to hold fixed, so its res-base
+  # number is uninterpretable without a capacity-matched partner at the same
+  # width. Three seeds, matching sens_hidden256_res.
+  - <<: *template
+    name: "sens_hidden256_ctrl"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 256
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Reverse direction: train on IEMOCAP, test on MSP-Podcast and SAMSEMO -
+  # Every result so far trains on MSP-Podcast, so "one training corpus" is a
+  # standing limitation. IEMOCAP is 4,490 rows against MSP-Podcast's 80,941,
+  # so these runs are roughly four times faster and three seeds is affordable
+  # as a screen. Three arms, because a res-base contrast without the placebo
+  # would not be readable: the SAMSEMO result already showed the placebo can
+  # carry most of an apparent gain.
+  #
+  # Expect weaker and noisier numbers than the forward direction. The class
+  # centroids are fitted on a quarter of a small corpus with ten speakers, so
+  # the auxiliary target itself is estimated far less precisely than it is
+  # from MSP-Podcast. A null here would be evidence about centroid estimation,
+  # not necessarily about the mechanism.
+  - <<: *template
+    name: "iemo_base"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "iemo_ctrl"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "iemo_res"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "SAMSEMO"]
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- VA only, at the headline configuration ----------------------------
+  # Dominance is the least reliable axis: the narrowest range in use
+  # (p5-p95 of 2.80 against 3.25 for valence) with comparable absolute
+  # disagreement, and Mahalanobis whitening UP-weights it because its variance
+  # is smallest. An earlier single-seed run (va_res, bert_lr 2e-5,
+  # inverse_freq) landed within noise of the full-VAD arm: IEMOCAP 61.76
+  # against 61.95 UAR and 80.31 against 80.36 neutral_auc. This repeats it at
+  # the headline setting with three seeds. The paired control is the existing
+  # cw_sqrt_ctrl, whose head is three wide rather than two; if this arm wins,
+  # a matched two-wide control is needed before the number is quotable.
+  - <<: *template
+    name: "va_sqrt_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    # One seed as a screen. Seed 42 only, so it pairs against the existing
+    # seed-42 baseline and residual. Widen to three seeds only if it looks
+    # different from the full-VAD arm; a one-seed read cannot resolve an
+    # effect this size (IEMOCAP UAR seed sd is about 0.7 against a 0.6 effect)
+    # and is here to decide whether the arm is worth more GPU time.
+    seeds: [42]
+    use_proto_predictor: true
+    proto_vad_dims: [0, 1]
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- WavLM at the headline configuration, all three arms ---------------
+  # The earlier WavLM comparison was one seed and showed roughly four times
+  # weaker selectivity (res-ctrl +0.28 against +1.23 for emotion2vec), inside
+  # one sd of zero. Three seeds and all three arms settle whether the
+  # mechanism exists on the standard SSL encoder at all.
+  #
+  # The pooling confound is now REMOVED. WavLMEncoder gained a frames path,
+  # so these arms hand the fusion a time axis through the same AttentionPool
+  # emotion2vec uses, giving audio_dim 3072 on both sides. Earlier WavLM
+  # numbers (single seed, inverse_freq) used mean pooling at 768 and are not
+  # comparable to these; a weak result here is attributable to the encoder
+  # rather than to the lost time axis.
+  - <<: *template
+    name: "wl_sqrt_base"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "wl_sqrt_ctrl"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "wl_sqrt_res"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Is the IEMOCAP-trained deficit convergence or capacity? ------------
+  # Training on IEMOCAP, both auxiliary arms sit BELOW the no-aux baseline on
+  # every corpus (res-base UAR -0.97 on MSP-Podcast, -2.51 on SAMSEMO, 0/3
+  # seeds). The train/val curves say this is underfitting, not overfitting:
+  # at epoch 8 the baseline has a train-val UAR gap of 3.8 points while both
+  # auxiliary arms have 0.6, and their TRAIN UAR is 5 to 6 points lower. The
+  # auxiliary objective is competing with the main task, and 4,490 rows over
+  # 8 epochs leaves no slack to absorb it.
+  #
+  # Doubling the budget to 16 epochs distinguishes the two explanations. If
+  # the deficit is convergence speed the arms should close on the baseline;
+  # if it is a hard capacity ceiling they will not. One seed, because this
+  # decides which sentence goes in the limitations section rather than
+  # producing a reported number. SWA window widened in proportion.
+  - <<: *template
+    name: "iemo16_base"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "SAMSEMO"]
+    num_epochs: 16
+    swa_last_n: 6
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "iemo16_res"
+    train_dataset: "IEMO"
+    test_datasets: ["MSPP", "SAMSEMO"]
+    num_epochs: 16
+    swa_last_n: 6
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Is the headline understated at 8 epochs? --------------------------
+  # Training on IEMOCAP, the auxiliary arm sat BELOW baseline at 8 epochs and
+  # ABOVE it at 16, on all four transfer metrics, with in-domain validation
+  # recovering from -2.22 to -0.22. The training curves showed the auxiliary
+  # arm reaching a lower TRAIN UAR at the same epoch, so the objective
+  # competes with the main task and needs a longer budget to pay off.
+  #
+  # Every MSP-Podcast arm in this file uses 8 epochs. If the same convergence
+  # lag applies there, the reported +0.72 UAR and +1.62 AUCneu understate the
+  # effect. One seed for base and residual decides whether the full five-seed
+  # set is worth rerunning at 16 epochs. MSP-Podcast epochs are roughly 35
+  # minutes, so this pair is about 10 hours against 2.5 for an 8-epoch run.
+  #
+  # Read the TRAIN curve as well as the transfer numbers: at 16 epochs on
+  # IEMOCAP the baseline overfitted harder (train-val UAR gap 12.7 against the
+  # residual's 8.0), so part of that reversal was the baseline degrading
+  # rather than the residual improving.
+  - <<: *template
+    name: "ep16_base"
+    num_epochs: 16
+    swa_last_n: 6
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "ep16_res"
+    num_epochs: 16
+    swa_last_n: 6
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Two untried levers, one seed each as screens -----------------------
+  # Everything tried so far either matches the headline or loses to it: dose
+  # response flat across 8x, VA-only within noise, hidden-256 lower on the
+  # reported corpora, euclidean collapses AUCneu, longer budget has no
+  # headroom on MSP-Podcast. These two are the remaining options that have a
+  # reason to be BETTER rather than merely different.
+
+  # Shared whitening. PREDICTION REGISTERED BEFORE RUNNING: this should be
+  # roughly NULL on neutral_auc, near raw VAD's +0.02 and the unwhitened
+  # residual's +0.07 rather than the per-class target's +1.33.
+  #
+  # Reasoning. With one pooled matrix the target is r = W(v - mu_c) = Wv -
+  # W mu_c, a single linear map of VAD plus a per-class constant. Given the
+  # class it is affine in VAD, and the head ends in a bare Linear that can
+  # absorb both the map and the constant, so it poses nearly the same learning
+  # problem as regressing raw VAD. Per-class whitening instead applies a
+  # DIFFERENT linear map per class (the matrices differ by up to 49 percent,
+  # happy against angry, condition numbers 5.7 to 8.6), which no single linear
+  # function of VAD can reproduce.
+  #
+  # That makes the ladder a single statement rather than a list: every target
+  # that is affine in VAD given the class is null (raw VAD +0.02, unwhitened
+  # residual +0.07), and the only one that works is the one that is not. A
+  # confirmed null here answers "is the target just VAD in disguise" with four
+  # rungs instead of two. A non-null result would falsify the account and is
+  # the more interesting outcome.
+  - <<: *template
+    name: "wsh_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_whiten_scope: "shared"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Anneal the auxiliary weight to zero over a 16-epoch budget, decaying
+  # across the last six. Training on IEMOCAP showed the objective competes
+  # with the main task (train UAR 5.5 points below baseline at epoch 8); on
+  # MSP-Podcast the same gap is 1.25 points. If the head helps by shaping the
+  # encoder early and only costs capacity later, annealing keeps the benefit
+  # and drops the cost. The longer budget gives the schedule room: the head is
+  # at full weight for ten epochs rather than five. It also makes the SWA
+  # window pure main-task, so a surviving gain cannot be a late-training
+  # calibration nudge.
+  #
+  # Compare against ep16_base, NOT against the 8-epoch baseline: MSP-Podcast
+  # validation plateaus by epoch 5 to 7 and the baseline overfits harder with
+  # a longer budget, so an 8-epoch reference would flatter this arm.
+  - <<: *template
+    name: "anneal16_res"
+    num_epochs: 16
+    swa_last_n: 6
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_anneal_epochs: 6
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Whitened residual plus class-whitened annotator dispersion, six outputs.
+  # THE POINT: every other target in this file is a deterministic function of
+  # (VAD, label) and so cannot carry more information than (VAD, label)
+  # already does. The whitened residual works by presenting that information
+  # in class-comparable units, not by adding to it, which is why the dose
+  # response is flat across 8x, why 1-residual reproduces it exactly, and why
+  # no reshaping tried so far has beaten it. Annotator dispersion is the first
+  # component that is NOT recoverable from the consensus rating or the label:
+  # two utterances with identical consensus VAD can have had very different
+  # rater agreement. This raises the information ceiling instead of
+  # rearranging what sits under it.
+  #
+  # Kept in the same class-whitened coordinates so both halves share units and
+  # the class-conditional structure the ladder shows is load-bearing.
+  #
+  # Prior art to distinguish in the paper: Eyben et al. 2012 use inter-rater
+  # standard deviation as an MTL target, but as the whole target on a
+  # dimensional main task. Here it is dispersion in class-normalised
+  # coordinates alongside the residual, under a categorical main task.
+  - <<: *template
+    name: "resdisp_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_target: "resdisp"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Precision-weighted residual: r = W_c (v - mu_c) / (1 + s), per axis, where
+  # s is the annotator dispersion on that axis. Roughly 29 percent of
+  # within-class VAD spread is annotator measurement noise (results log,
+  # section 4), and the plain residual cannot separate a genuinely atypical
+  # speaker from raters who could not agree. Dividing by dispersion shrinks
+  # the second case so the magnitude means RELIABLY atypical.
+  #
+  # This modulates the working target rather than widening it, which is the
+  # lesson from resdisp: appending dispersion as three extra outputs lost 1.83
+  # UAR against the placebo, because dispersion is apparently not recoverable
+  # from audio and text AND a standard deviation carries no direction, the
+  # same defect that made the scalar protoscore null. Here dispersion is never
+  # predicted and all three signed components survive.
+  #
+  # Expectation: a modest change, not a breakthrough. The new target
+  # correlates 0.96 per axis with the plain residual and preserves sign on
+  # 100 percent of entries, with rank correlation 0.93 on magnitude. Its sd
+  # falls from 1.00 to 0.65, which acts like a lower loss weight, though the
+  # dose response was flat from 0.25 to 2.0 so that alone should not matter.
+  #
+  # Distinct from the prior art: Kim and Provost 2015 weight the LOSS by
+  # agreement, Eyben et al. 2012 predict rater std AS a target. Weighting the
+  # target's magnitude by rater precision is neither.
+  - <<: *template
+    name: "presid_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_target: "presidual"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Prototypicality residual PLUS the aux VAD subtype-cluster head, together.
+  # Two independent heads with independent losses (train.py:1250 and the
+  # proto_predictor branch), weighted 1.0 and 0.2, so the cluster head takes
+  # about a fifth of the auxiliary gradient rather than half. That asymmetry
+  # is the point: resdisp failed partly because the added component carried
+  # 54 percent of the target variance and diluted the half that works.
+  #
+  # Why this is the best remaining candidate. A cluster assignment is an
+  # argmin over per-class VAD centroids, so it is DISCRETE and NOT affine in
+  # VAD given the class. Every null so far has been affine in VAD given the
+  # class (raw VAD +0.02, unwhitened residual +0.07, shared whitening
+  # predicted null); this is the only untested target that fails that
+  # description. It is also complementary in form: the residual is continuous
+  # and directional, "where within your class", the cluster is discrete and
+  # categorical, "which subtype of your class".
+  #
+  # Caveats recorded before running. The earlier belief that aux VAD
+  # clustering helps rests on arms that predate the neutral_auc metric and sit
+  # at a different configuration (IEMOCAP UAR 58 to 59 against the current
+  # 60.2), so it is not established at the headline setting. And the pair of
+  # arms that appeared to test cluster-plus-proto, auxvad_MSPP_on and
+  # auxvad_MSPP_on_proto, are byte-identical results files: that comparison
+  # was a run against itself and the combination has never actually been run.
+  # A cluster id also discards direction within the cluster, the defect that
+  # made the scalar protoscore null.
+  - <<: *template
+    name: "protoclust_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    use_aux_vad_cluster: true
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # === Speaker-disjoint validation block ================================
+  # Two purposes. First, measure whether a speaker-independent validation
+  # score predicts cross-corpus transfer, which the leaky class-stratified
+  # split does not: across 28 runs its val UAR correlates +0.17 with IEMOCAP
+  # UAR, -0.35 with SAMSEMO, and -0.45 within the baseline arm across seeds.
+  # If the speaker-disjoint version correlates, it becomes a usable selection
+  # and tuning signal and the headline should be rerun on it. If it does not,
+  # the unfreeze comparison is repeated on the random split instead.
+  # Second, test 4/4 unfreezing, which has never been run: uf_a4 and uf_ab4
+  # exist in configs/unfreeze_screen.yaml at zero completed runs, so every
+  # result in this project is 2/2 or shallower.
+  #
+  # These arms are NOT comparable to the cw_sqrt_* headline, which used the
+  # class-stratified random split and therefore trained on different rows.
+  # The 2/2 block below is the reference for the 4/4 block.
+  - <<: *template
+    name: "sv_base"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "sv_ctrl"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "sv_res"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # 4/4 unfreezing. Roughly doubles the trainable parameters in both
+  # encoders, so watch VRAM: 2/2 sits at about 8 GB of 24 with gradient
+  # checkpointing on. If this runs out of memory the fix is grad accumulation,
+  # not a smaller batch, because batch size changes the comparison.
+  - <<: *template
+    name: "sv4_base"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "sv4_ctrl"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "sv4_res"
+    val_split_by_speaker: true
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Random-split twins of sv_base and sv_res, with the same per-epoch test
+  # trace. Without these there is nothing to compare the speaker-disjoint
+  # correlation against: a correlation of, say, 0.4 means little unless the
+  # leaky split scores lower on identical runs. Same seeds, same everything
+  # else, so the only difference is how the 25 percent is chosen.
+  - <<: *template
+    name: "rv_base"
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "rv_res"
+    trace_test_each_epoch: true
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Four more seeds for shared whitening, to sit alongside the five-seed
+  # per-class arm. Seed 42 is not repeated; the runner has no skip-completed
+  # logic.
+  #
+  # Why this matters: at seed 42 shared whitening reached +1.40 AUCneu against
+  # the baseline where per-class reached +1.54, a gap of 0.14 against a
+  # seed-noise sd of 0.47, while raw VAD managed +0.48 and the unwhitened
+  # residual +0.29. That FALSIFIES the prediction registered above, which
+  # expected shared whitening to be null because W(v - mu_c) = Wv - W mu_c is
+  # affine in VAD given the class. It is not null, so class-conditionality is
+  # not what makes the target work; the covariance rescaling is, and a single
+  # pooled matrix captures nearly all of it.
+  #
+  # Read with care: seed 42 flatters every arm on IEMOCAP. Raw VAD shows +0.48
+  # at this seed against a five-seed mean of +0.02, and the unwhitened
+  # residual +0.29 against +0.07. Only multi-seed numbers can settle where
+  # shared whitening sits.
+  - <<: *template
+    name: "wsh_res_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_whiten_scope: "shared"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # 4/4 unfreezing on the random split, so it pairs against the cw_sqrt_*
+  # headline rather than the speaker-disjoint arms. The speaker-split version
+  # (sv4_*) showed AUCneu essentially unchanged by depth, +1.05 at 2/2 against
+  # +1.07 at 4/4, and only about +0.2 UAR on absolute performance for 40 percent
+  # more compute. This repeats that on the configuration the paper reports.
+  #
+  # VRAM measured at 2.97 GiB peak, batch 16, 6s audio, with gradient
+  # checkpointing on both encoders. 89.8M trainable of 235.8M.
+  - <<: *template
+    name: "uf4_base"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_res"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Anneal the auxiliary weight to zero over the last three of eight epochs.
+  # Tests whether the head's COST is a timing effect. The permuted control
+  # costs 0.3 to 0.9 accuracy on every corpus (IEMOCAP -0.43, SAMSEMO -0.28,
+  # MSP-Improv -0.85, CMU-MOSEI -0.62), which can only be gradient noise into
+  # the shared trunk since its target carries no information. If that cost is
+  # incurred late, switching the head off for the final epochs should recover
+  # accuracy while keeping whatever the target shaped early. It also makes the
+  # SWA window (last 3 epochs) pure main-task, so a surviving gain cannot be a
+  # late-training calibration artifact.
+  - <<: *template
+    name: "anneal8_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_anneal_epochs: 3
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # PCGrad gradient surgery on the auxiliary loss. Same target as cw_sqrt_res;
+  # only how its gradient reaches the shared trunk changes. Where the
+  # auxiliary and classification gradients conflict, the auxiliary one is
+  # projected onto the orthogonal complement of the main gradient, so it can
+  # only move the representation in directions that do not oppose
+  # classification.
+  #
+  # Motivation: the permuted control costs 0.3 to 0.9 accuracy on every corpus
+  # (IEMOCAP -0.43, SAMSEMO -0.28, MSP-Improv -0.85, CMU-MOSEI -0.62). Its
+  # target carries no information, so that cost is interference and nothing
+  # else. If interference is what the head charges, removing the conflicting
+  # component should recover accuracy while keeping the boundary effect.
+  #
+  # Costs one extra backward pass over the trunk per step, so expect roughly
+  # 1.5x the wall time.
+  - <<: *template
+    name: "pcgrad_res"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_pcgrad: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Four more PCGrad seeds. Seed 42 is not repeated.
+  #
+  # Seed-42 read, for context: PCGrad was WORSE than the plain residual on
+  # IEMOCAP (AUCneu +1.42 against +1.54, accuracy +0.09 against +0.40) and
+  # better on SAMSEMO (best arm on all four metrics, but every margin under
+  # 0.35). It still beats the baseline everywhere, so this is not a failure,
+  # it is an absence of improvement.
+  #
+  # The reason to run it at five seeds is not to find a better arm but to
+  # support a robustness sentence: removing the conflicting component of the
+  # auxiliary gradient does not change the effect, so the mechanism is not an
+  # artefact of gradient interference with the classification loss. Together
+  # with the annealing null, that closes the two obvious "the head is just
+  # perturbing optimisation" objections.
+  #
+  # Costs one extra backward pass per step, about 2.8 h per seed against 2.5.
+  - <<: *template
+    name: "pcgrad_res_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_pcgrad: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Four more seeds for the 4/4 unfrozen pair. Seed 42 is not repeated.
+  #
+  # At seed 42 this is the only change in a week that moved every metric on
+  # both reported corpora in the right direction at once. res-base went from
+  # +0.40 to +1.27 accuracy and +1.54 to +1.64 AUCneu on IEMOCAP, and from
+  # -0.06 to +0.44 accuracy and +0.12 to +0.51 AUCneu on SAMSEMO.
+  #
+  # It is not simply more capacity helping. The 4/4 BASELINE is slightly worse
+  # than the 2/2 baseline (IEMOCAP accuracy 62.78 against 63.18), so the extra
+  # unfrozen layers do not help on their own; the auxiliary head is what uses
+  # them. That also reframes the accuracy cost: annealing and PCGrad both
+  # failed to remove it at 2/2, and here it disappears without either.
+  #
+  # One seed, so this is a lead. Four more decide whether it is real.
+  - <<: *template
+    name: "uf4_base_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_res_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Full unfreeze, one seed. emotion2vec has 8 blocks and BERT 12, so 8/12 is
+  # everything: 174.8M trainable of 235.8M, against 89.8M at 4/4 and 61.4M at
+  # 2/2.
+  #
+  # Why: 2/2 to 4/4 improved res-base on every metric on both reported corpora
+  # (IEMOCAP accuracy -0.14 to +0.87, UAR +0.74 to +1.17, AUCneu +1.61 to
+  # +1.84 over two paired seeds). Whether that continues is unknown; 174.8M
+  # trainable parameters against roughly 60k training rows could equally
+  # overfit. One seed decides whether the direction is worth pursuing.
+  #
+  # VRAM: the 4/4 job runs at about 9 GB of 24 with gradient checkpointing on
+  # both encoders and a measured 2.97 GiB activation peak. Doubling trainable
+  # parameters adds roughly 1 GB of gradients and optimiser state plus a few
+  # GB of activations, so this should land near 13 to 14 GB. If it OOMs the
+  # fix is more gradient accumulation, not a smaller batch, because batch size
+  # changes the comparison.
+  - <<: *template
+    name: "uf8_base"
+    unfreeze_audio_layers: 8
+    unfreeze_bert_layers: 12
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf8_res"
+    unfreeze_audio_layers: 8
+    unfreeze_bert_layers: 12
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Capacity-matched control at 4/4. Required if 4/4 becomes the headline
+  # configuration: every 4/4 number so far is res-base, while the paper's
+  # claim is res-ctrl. Identical to uf4_res except proto_predictor_shuffle,
+  # which permutes the auxiliary target within the batch, so the head, its
+  # parameter count, its gradient path and its target marginal are unchanged
+  # and only the sample-to-target pairing is destroyed.
+  - <<: *template
+    name: "uf4_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Auxiliary VAD subtype clustering on its own, as a comparison point for the
+  # paper's table. This is the separate aux_vad_cluster mechanism, not the
+  # proto predictor: a discrete head predicting which of two per-class KMeans
+  # VAD centroids a sample is nearest, at weight 0.2.
+  #
+  # It belongs in the comparison because it is the closest thing in this
+  # project to a prior approach, and because a cluster assignment is an argmin
+  # over per-class centroids, so it is discrete and NOT affine in VAD given
+  # the class. That distinguishes it from raw VAD regression, which is already
+  # in the table as sens_rawvad_res and is null (+0.02 AUCneu at five seeds).
+  #
+  # Note the earlier belief that this mechanism helps rests on runs that
+  # predate the neutral_auc metric and sit at a different configuration, and
+  # the arms that appeared to test it combined with the proto head
+  # (auxvad_MSPP_on and auxvad_MSPP_on_proto) are byte-identical results
+  # files. This is its first clean measurement at the headline setting.
+  - <<: *template
+    name: "auxvad_only"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: false
+    use_aux_vad_cluster: true
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Alternative control constructions, one seed each, to show the result does
+  # not depend on how the control target is built.
+  #
+  # The default control permutes within the batch. Two cosmetic objections:
+  # a random permutation has exactly one fixed point in expectation whatever
+  # its size, so about 6 percent of samples at batch 16 receive their own
+  # target; and batches are length-bucketed rather than random. The second was
+  # measured and does not bite here (duration against residual magnitude
+  # correlates -0.031, and mean duration varies 5.58 to 5.76 seconds across the
+  # four classes), but both go away below.
+  #
+  # "pool" draws each control target uniformly from the training split's own
+  # residuals: no fixed points (self-collision probability 1.2e-05 per sample),
+  # no dependence on batch composition, same marginal.
+  - <<: *template
+    name: "ctrl_pool"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # "gauss" draws from a Gaussian matched to the pool's mean and covariance,
+  # so no real row is reused at all. Independent of the pool construction, so
+  # agreement between the three is evidence about the control design rather
+  # than about one particular way of scrambling.
+  - <<: *template
+    name: "ctrl_gauss"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "gauss"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Annotator agreement AS the auxiliary target, at 4/4. This is the direct
+  # comparison against the closest prior art: Kim and Provost (ACII 2015)
+  # define prototypicality as annotator agreement, weight IEMOCAP four-class
+  # training by it, and find the gain concentrated on neutral. Running their
+  # quantity through our head makes the distinction empirical.
+  #
+  # Prediction, registered before the run: this should do LESS than the
+  # whitened residual, for two independent reasons. It is a scalar, and every
+  # scalar target tried in this project has been null (protoscore discards
+  # direction and does nothing) while the direction-preserving three-vector
+  # works. And it measures something nearly orthogonal to our target: across
+  # 80,941 training rows, class agreement correlates +0.027 with Mahalanobis
+  # atypicality, with per-axis signed correlations at most 0.086.
+  #
+  # Run at 4/4 so it pairs against uf4_base and uf4_ctrl, which have four
+  # seeds each. If the headline stays at 2/2 this should be repeated there;
+  # it is cheaper (2.5 h against 3.7 h per seed).
+  - <<: *template
+    name: "uf4_agree"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "agreement"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Four more seeds for the pool-draw control, so it can serve as the PRIMARY
+  # control rather than a robustness check. Seed 42 is not repeated.
+  #
+  # Chosen on design, not on margin: a within-batch permutation has exactly one
+  # fixed point in expectation whatever the batch size, so about 6 percent of
+  # samples at batch 16 are handed their own target and the control is that
+  # much informative by construction. Drawing from the training split's
+  # residual pool removes it entirely (self-collision probability 1.2e-05 per
+  # sample) and does not depend on batch composition.
+  #
+  # The batch-permutation control keeps its five seeds and moves to the
+  # appendix, so the paper can state the result under both constructions.
+  - <<: *template
+    name: "ctrl_pool_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Complete the ablation ladder to five seeds. raw VAD and the per-class
+  # residual already have five; the unwhitened residual has three and shared
+  # whitening two of four. A uniform seed count matters here because the
+  # ladder is the paper's mechanism argument, and a reader comparing +0.07
+  # (n=3) against +1.33 (n=5) is entitled to ask whether the seed sets differ.
+  #
+  # wsh_res_more already covers 1234 and 2024 and the launcher keeps completed
+  # seeds, so rerunning that arm fills only what is missing.
+  - <<: *template
+    name: "sens_euclid_res_more"
+    unfreeze_audio_layers: 2
+    unfreeze_bert_layers: 2
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_metric: "euclidean"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Ablation ladder at 4/4, to match uf4_base / uf4_ctrl / uf4_res. Three
+  # seeds each: the two rungs that carry the mechanism argument are raw VAD
+  # (shows the effect is not VAD multi-task learning) and the unwhitened
+  # residual (shows the covariance scaling is what matters). Shared whitening
+  # is omitted at this depth; it matched per-class at 2/2 (+1.40 against
+  # +1.46 AUCneu) and is a secondary point.
+  - <<: *template
+    name: "uf4_rawvad"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "rawvad"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_euclid"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_metric: "euclidean"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Pool-draw control at 4/4. uf4_ctrl uses the within-batch permutation,
+  # which hands about 6 percent of samples their own target. If 4/4 is the
+  # headline, its control should be the leak-free one for the same reason the
+  # 2/2 control was switched.
+  - <<: *template
+    name: "uf4_ctrl_pool"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Aux VAD subtype clustering at 4/4, as the comparison point for the paper's
+  # table. Moved from 2/2 now that 4/4 is the headline configuration.
+  - <<: *template
+    name: "uf4_auxvad"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: false
+    use_aux_vad_cluster: true
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Inter-rater standard deviation as the auxiliary target, the Eyben et al.
+  # 2012 signal, isolated. resdisp tested it concatenated with the residual
+  # and lost 1.83 UAR against the control, but that confounds "dispersion does
+  # not help" with "dispersion dilutes a target that works". Three dims, same
+  # head and weight as every other arm.
+  - <<: *template
+    name: "uf4_disp"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "dispersion"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Secondary-label target: where the annotators who did NOT vote the majority
+  # class went instead. The four-class vote distribution with the sample's own
+  # class zeroed and renormalised.
+  #
+  # 85.9 percent of MSP-Podcast clips have a nonzero runner-up class, with a
+  # mean runner-up mass of 0.215, so this is a well-populated signal rather
+  # than a sparse one.
+  #
+  # Distinct from soft-label training (Ando et al. 2018) and from label
+  # smoothing: removing the true-class mass leaves a target carrying no
+  # information about the label itself, only about the DIRECTION of
+  # disagreement. Its neutral component supervises the neutral boundary
+  # directly rather than inferring it through VAD geometry, which makes it the
+  # closest competitor to the residual on the paper's own terms.
+  - <<: *template
+    name: "uf4_offlabel"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "offlabel"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Seed 2024 for the batch-permutation control at 4/4. That arm stopped at
+  # four seeds when the disk filled. One more takes SAMSEMO UAR res-ctrl from
+  # t=3.07 against a critical 3.18 at n=4 to significance at n=5, which is the
+  # cheapest significant cell available anywhere in this project.
+  - <<: *template
+    name: "uf4_ctrl_s2024"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [2024]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Three further seeds on base and control only, to firm up the capacity
+  # claim. That claim -- an auxiliary head with an unlearnable target gains
+  # about half a UAR point at 4/4 -- currently rests on IEMOCAP UAR ctrl-base
+  # at t=3.21 against a critical 3.18, significant by 0.03. On AUCneu it would
+  # need 19 seeds and on SAMSEMO 21, so those stay descriptive, but doubling
+  # the IEMOCAP UAR sample roughly halves its interval.
+  #
+  # The residual arm is NOT rerun: ctrl-base does not involve it.
+  - <<: *template
+    name: "uf4_base_x3"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [31337, 2718, 1618]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_ctrl_x3"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [31337, 2718, 1618]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Seeds 1234 and 2024 for each comparison arm, taking the auxiliary-target
+  # table to five seeds throughout. At three seeds the critical t is 4.303,
+  # so those rows could show a large difference from ours but could not
+  # establish a null; at five it drops to 2.776. Since the table is the
+  # paper's central exhibit, a uniform seed count across rows also removes the
+  # question of whether the comparisons were given a fair chance.
+  - <<: *template
+    name: "uf4_rawvad_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_target: "rawvad"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_agree_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_target: "agreement"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_disp_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_target: "dispersion"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_offlabel_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_target: "offlabel"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_auxvad_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: false
+    use_aux_vad_cluster: true
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_euclid_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_metric: "euclidean"
+    class_weight_mode: "sqrt_inverse_freq"

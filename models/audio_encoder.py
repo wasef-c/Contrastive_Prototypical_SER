@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Audio encoders: Wav2Vec2 and Emotion2Vec with optional partial unfreezing.
-Both mirror the FrozenBERTEncoder pattern from models/encoder.py.
+Audio encoders: Wav2Vec2, WavLM and Emotion2Vec with optional partial
+unfreezing. All mirror the FrozenBERTEncoder pattern from models/encoder.py.
 """
 
 import re
@@ -11,11 +11,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from funasr import AutoModel
-from transformers import Wav2Vec2Model, Wav2Vec2Processor
+from transformers import (Wav2Vec2FeatureExtractor, Wav2Vec2Model,
+                          Wav2Vec2Processor, WavLMModel)
 
 
 class Wav2Vec2Encoder(nn.Module):
-    """Wav2Vec2 encoder with optional partial unfreezing of top transformer layers"""
+    """Wav2Vec2 encoder with optional partial unfreezing of top transformer layers.
+
+    The backbone and feature-extractor classes are class attributes so that
+    other HuggingFace speech encoders sharing this API (WavLM, HuBERT) can
+    reuse the whole implementation by overriding them alone.
+    """
+
+    BACKBONE_CLS = Wav2Vec2Model
+    PROCESSOR_CLS = Wav2Vec2Processor
 
     def __init__(self, model_name="facebook/wav2vec2-base-960h", unfreeze_layers=0):
         super().__init__()
@@ -23,9 +32,9 @@ class Wav2Vec2Encoder(nn.Module):
         self.model_name = model_name
         self.unfreeze_layers = unfreeze_layers
 
-        print(f"Loading Wav2Vec2 model: {model_name}")
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained(model_name)
-        self.processor = Wav2Vec2Processor.from_pretrained(model_name)
+        print(f"Loading {type(self).__name__} backbone: {model_name}")
+        self.wav2vec2 = self.BACKBONE_CLS.from_pretrained(model_name)
+        self.processor = self.PROCESSOR_CLS.from_pretrained(model_name)
 
         self.output_dim = self.wav2vec2.config.hidden_size  # 768 for base
 
@@ -42,8 +51,17 @@ class Wav2Vec2Encoder(nn.Module):
                 for param in encoder_layers[i].parameters():
                     param.requires_grad = True
 
-            # Enable gradient checkpointing to save activation memory
-            self.wav2vec2.gradient_checkpointing_enable()
+            # Enable gradient checkpointing to save activation memory.
+            # use_reentrant is pinned rather than left to the library default,
+            # which has moved across transformers versions. The reentrant
+            # implementation skips the checkpointed backward when no INPUT to
+            # the segment requires grad, which is exactly what silently
+            # disabled BERT training here (see encoder.py). Checked on the
+            # current version: this model trains either way, 32 of 32
+            # trainable tensors receiving nonzero gradient with the default.
+            # Pinning it keeps that true if the default changes again.
+            self.wav2vec2.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False})
             trainable = sum(p.numel() for p in self.wav2vec2.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.wav2vec2.parameters())
             print(f"  {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")
@@ -124,6 +142,96 @@ class Wav2Vec2Encoder(nn.Module):
     def get_output_dim(self):
         """Get output feature dimension"""
         return self.output_dim
+
+
+class WavLMEncoder(Wav2Vec2Encoder):
+    """WavLM encoder, API-compatible with Wav2Vec2Model.
+
+    WavLM adds denoising pretraining and speech-like noise augmentation on top
+    of the wav2vec 2.0 recipe, and leads recent multi-corpus emotion
+    benchmarks. It is used here as the general-purpose SSL contrast against
+    emotion2vec's emotion-specific pretraining.
+
+    Only the backbone and feature extractor differ. WavLM checkpoints ship a
+    feature extractor but no tokenizer, so Wav2Vec2Processor cannot load them;
+    Wav2Vec2FeatureExtractor is the right class and is in any case unused, as
+    the data pipeline hands the encoder raw waveforms directly.
+
+    Supports pooling="frames" so the encoder can be compared with emotion2vec
+    on equal terms. Without it the two encoders differ in two ways at once:
+    emotion2vec hands the fusion 32 frames of 768 (3072 after the attention
+    pooler) while this class mean-pools to a single 768 vector. A weaker
+    result under mean pooling cannot then be attributed to the encoder rather
+    than to the lost time axis, which is exactly the confound the frames mode
+    removes.
+    """
+
+    BACKBONE_CLS = WavLMModel
+    PROCESSOR_CLS = Wav2Vec2FeatureExtractor
+
+    def __init__(self, model_name: str, unfreeze_layers: int = 0,
+                 pooling: str = "mean") -> None:
+        """Build the encoder.
+
+        Args:
+            model_name: HuggingFace checkpoint name.
+            unfreeze_layers: Number of top encoder layers to unfreeze.
+            pooling: "mean" collapses time inside this class; "frames"
+                returns the time axis for a downstream pooler.
+        """
+        super().__init__(model_name=model_name, unfreeze_layers=unfreeze_layers)
+        if pooling not in ("mean", "frames"):
+            raise ValueError(
+                f"unknown pooling mode: {pooling}. WavLMEncoder supports "
+                f"mean or frames.")
+        self.pooling: str = pooling
+        self.returns_frames: bool = (pooling == "frames")
+        if self.returns_frames:
+            print(f"  WavLM pooling 'frames': returning [B, T, {self.output_dim}]")
+
+    def forward(self, waveforms, attention_mask=None):
+        """Raw waveforms in, pooled features or frame features out.
+
+        Args:
+            waveforms: [B, num_samples] raw audio at 16 kHz.
+            attention_mask: [B, num_samples] 1 for real samples, 0 for padding.
+
+        Returns:
+            [B, output_dim] when pooling is "mean", or [B, T, output_dim] with
+            padded positions zeroed when pooling is "frames".
+        """
+        if not self.returns_frames:
+            return super().forward(waveforms, attention_mask)
+
+        if self.unfreeze_layers == 0:
+            self.wav2vec2.eval()
+            with torch.no_grad():
+                outputs = self.wav2vec2(
+                    input_values=waveforms,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                )
+        else:
+            outputs = self.wav2vec2(
+                input_values=waveforms,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
+        hidden_states = outputs.last_hidden_state          # [B, T, D]
+
+        # Zero the padded positions, matching Emotion2VecEncoder's frames
+        # branch, so a downstream pooler can recover the mask from the frames
+        # themselves rather than needing it passed separately.
+        if attention_mask is not None:
+            output_lengths = self.wav2vec2._get_feat_extract_output_lengths(
+                attention_mask.sum(dim=1).long()
+            )
+            max_t = hidden_states.size(1)
+            frame_mask = (torch.arange(max_t, device=hidden_states.device)
+                          .unsqueeze(0) < output_lengths.unsqueeze(1))
+            hidden_states = hidden_states * frame_mask.unsqueeze(-1).to(
+                hidden_states.dtype)
+        return hidden_states
 
 
 class Emotion2VecEncoder(nn.Module):

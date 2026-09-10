@@ -7,6 +7,14 @@ import yaml
 from utils.prototypicality import DEFAULT_EXPECTED_VAD
 
 
+# Encoders that consume raw waveforms rather than precomputed feature vectors.
+# Kept in one place because the membership test is needed in the dataset
+# loader, the trainer and the runner; when it was written out by hand at each
+# site, adding an encoder silently loaded the precomputed-feature datasets
+# instead, whose label columns differ, and every row was rejected as invalid.
+RAW_AUDIO_ENCODERS = ("wav2vec2", "emotion2vec", "wavlm")
+
+
 class Config:
     """Clean configuration for contrastive learning experiments"""
 
@@ -29,7 +37,8 @@ class Config:
         self.bert_learning_rate = 5e-7  # 10x lower than main LR
 
         # Audio encoder
-        self.audio_encoder_type = "preextracted"  # "preextracted", "wav2vec2", or "emotion2vec"
+        # "preextracted", "wav2vec2", "emotion2vec", or "wavlm"
+        self.audio_encoder_type = "preextracted"
         self.audio_model_name = "facebook/wav2vec2-base-960h"
         self.unfreeze_audio_layers = 0  # 0 = fully frozen, 2-4 = unfreeze top N layers
         self.audio_learning_rate = 5e-7  # differential LR for wav2vec2/emotion2vec
@@ -73,6 +82,27 @@ class Config:
         # presence-detector member of the stacked ensemble, where the second
         # member still predicts all four classes. Set num_classes to 2 with it.
         self.binary_neutral = False
+
+        # Drop neutral from the split entirely and renumber the emotional
+        # classes to 0..K-1. The second stage of the hierarchical system,
+        # where a detector already owns the presence decision. Set
+        # num_classes to 3 with it. Mutually exclusive with binary_neutral.
+        self.drop_neutral = False
+
+        # Feature-level fusion of a neutral-vs-emotional presence branch into
+        # the four-way head. Unlike the stacked ensemble, which combines two
+        # trained models at the decision level, this shares one backbone and
+        # concatenates the detector's hidden representation into the
+        # classification head, so presence evidence reaches the classifier
+        # before it is collapsed into two probabilities.
+        self.use_detector_fusion = False
+        self.detector_fusion_dim = 128
+        self.detector_fusion_weight = 0.5
+        # Placebo: keep the branch, its parameters and the concatenation, but
+        # train its head on shuffled presence targets so it carries no
+        # presence information. Any gain that survives this is attributable to
+        # the detector signal rather than the extra capacity.
+        self.detector_fusion_shuffle = False
 
         # Dump per-sample logits for the held-out split and every test corpus
         # at the end of a run, so ensembling and threshold sweeps are offline
@@ -149,6 +179,42 @@ class Config:
         # Muted-emotion mixup: synthesise the sparse low-salience
         # emotional region instead of reweighting it. See utils/muted_mixup.py.
         self.use_muted_mixup = False
+        # Calibrate the blend coefficient from each sample's measured VAD
+        # intensity instead of drawing it from Beta, so a loud utterance is
+        # muted hard and a quiet one is left alone, and the synthetic samples
+        # land in the low-intensity region the training set barely covers.
+        self.muted_mixup_vad_calibrated = False
+        # Upper bound of the target intensity band, as a quantile of the
+        # batch's own intensity spread. Lower pushes further into the quiet end.
+        self.muted_mixup_vad_quantile = 0.5
+        # Control for the calibrated variant: permute the coefficients across
+        # samples, matching their distribution while destroying the link
+        # between a sample's real intensity and how far it gets muted.
+        self.muted_mixup_vad_shuffle = False
+        # Move each class toward whichever intensity end its own training data
+        # is thin at, instead of muting every class toward neutral. On
+        # MSP-Podcast only angry is sparse when quiet; sad is already
+        # concentrated there, so muting it adds density at the neutral
+        # boundary rather than filling a gap.
+        # Bidirectional blending gated by measured VAD: only emotional
+        # samples that are loud for their class get muted, and only clearly
+        # central neutral samples take on a little emotion. Both sides gain
+        # samples in proportion, so the prior is left where it was.
+        self.muted_mixup_gated_symmetric = False
+        self.muted_mixup_gate_quantile = 0.5
+        # Which modality the blend touches. Intensity is prosodic, so
+        # audio-only is the version that states the hypothesis; text-only is
+        # its mirror-image control and both is the original behaviour.
+        self.muted_mixup_mix_audio = True
+        self.muted_mixup_mix_text = True
+        self.muted_mixup_sparse_fill = False
+        # Which classes participate. Empty means every emotional class. Use
+        # e.g. [3] to run the angry-only variant, the one case where the
+        # mechanism provably reaches an empty region rather than interpolating.
+        self.muted_mixup_sparse_classes = []
+        # Where in the sparse tail to aim, as a quantile of that class's own
+        # intensity distribution.
+        self.muted_mixup_sparse_target_q = 0.1
         self.muted_mixup_alpha = 2.0
         self.muted_mixup_weight = 0.5
         self.muted_mixup_control = False   # placebo: blend toward another emotion
@@ -173,6 +239,50 @@ class Config:
 
         # Auxiliary prototypicality prediction
         self.use_proto_predictor = False
+        # Control task for the prototypicality head: permute the targets
+        # within the batch so the head keeps its capacity but predicts a
+        # value that does not belong to the sample.
+        self.proto_predictor_shuffle = False
+        # Linear ramp of the auxiliary weight over the first N epochs.
+        self.proto_predictor_warmup_epochs = 0
+        # Decay the auxiliary weight to zero over the final N epochs.
+        self.proto_predictor_anneal_epochs = 0
+        # Log cos(g_main, g_aux) on the shared trunk every N steps. Zero
+        # disables. This is the diagnostic for whether the auxiliary
+        # gradient still points the same way as the classifier once the
+        # encoders are unfrozen; near-zero cosine means the aux is acting
+        # as structured gradient noise rather than transferring anything.
+        self.proto_grad_cosine_every = 0
+
+        # Group similar-duration utterances into the same batch. Only
+        # applies to raw-audio (unfrozen encoder) runs, where the collate
+        # pads to the batch maximum and random batching wastes ~40% of
+        # compute on padding.
+        self.use_length_bucketing = False
+        self.length_bucket_window = 50
+        # What the prototypicality head predicts. 'scalar' collapses the
+        # 3-D position into one number, so loud-atypical and quiet-atypical
+        # share a target; 'residual' keeps the direction; 'subtype' asks
+        # which cluster within the class, which is the version that does
+        # not assume each emotion is unimodal.
+        # Couple the mixup and the prototypicality head: a blended sample
+        # keeps its hard class label but gets an auxiliary target computed
+        # from where the blend landed in VAD space. Requires
+        # use_proto_predictor and proto_target='residual'.
+        self.use_consistent_mixup = False
+        self.consistent_mixup_weight = 0.5
+        # scalar | residual | subtype | allclass | signed.
+        # allclass predicts the residual to EVERY class centre, which is
+        # what the angry/sad boundary needs; signed splits the residual
+        # into a signed component along the class's own direction away
+        # from neutral and the leftover, so intensifying within a class
+        # is no longer scored as atypical.
+        self.proto_target = 'scalar'
+        # Euclidean treats V, A and D as equally scaled and uncorrelated.
+        # Measured per-class covariances have condition numbers of 6 to 9,
+        # so that is wrong; mahalanobis corrects it, and combined with
+        # 'residual' gives a whitened residual whose norm is that distance.
+        self.proto_metric = 'euclidean'  # euclidean | mahalanobis
         self.proto_predictor_weight = 0.5  # λ for MSE(pred_proto, actual_proto)
         self.proto_predictor_hidden_dim = 256
 
@@ -295,7 +405,70 @@ class Config:
         #   "regression" -> predict raw (V, A, D) with MSE; no centroids.
         #                   Tests whether continuous VAD supervision matches
         #                   the discretized cluster target.
+        #   "subtype"    -> predict the annotator-supplied secondary tags
+        #                   (multi-label BCE). Targets come from the joined
+        #                   MSP-Podcast annotator metadata, not from k-means,
+        #                   so the subtypes are the ones humans named rather
+        #                   than ones inferred from VAD geometry.
         self.aux_vad_task = "cluster"
+        # Clusters for aux_vad_task="resid_cluster". Under scope "shared"
+        # this is the total number of deviation modes across all classes;
+        # under "per_class" it is the number fitted inside each class.
+        # Merge MSP-Podcast's official Train and Development splits into one
+        # training pool. Development holds 46 percent of the corpus's angry
+        # data, and every evaluation corpus here is external, so holding it
+        # out costs minority-class coverage and buys nothing.
+        # Nearest-prototype distance stream mixed into the class logits.
+        # Requires aux_vad_task="regression" so predicted VAD is available
+        # without a label at test time. The residual signal has repeatedly
+        # shown up in AUC but not UAR, meaning it shapes the representation
+        # without reaching the argmax; this puts it in the decision.
+        # Fit the class prototypes from only the highest-agreement samples
+        # in each class, at this within-class quantile. 0 disables it and
+        # uses every sample, which is the historical behaviour. A contested
+        # utterance's consensus VAD summarises a disagreement rather than
+        # measuring the emotion, so it does not belong in the definition of
+        # what that emotion sounds like.
+        # Class-stratified subsample of the training pool, 1.0 = all rows.
+        # Exists for unfrozen sweeps, where a full-pool epoch costs 47 minutes
+        # because every step runs raw audio through emotion2vec. Validation is
+        # never subsampled.
+        self.train_subsample_frac = 1.0
+        # Weight the prototypicality-head loss by annotator agreement.
+        # "per_class" whitens each class's residual by its own covariance,
+        # which puts every class in a different coordinate system; "shared"
+        # pools the within-class scatter so all residuals live in one space.
+        # VAD axes used by the prototypicality target: 0=valence,
+        # 1=arousal, 2=dominance. [0,1] drops dominance.
+        self.proto_vad_dims = [0, 1, 2]
+        self.proto_whiten_scope = "per_class"
+        self.proto_agreement_weight = False
+        # Which agreement notion the centroid filter selects on:
+        # "class" = fraction of annotators choosing the majority label,
+        # "vad"   = inverse mean annotator VAD dispersion.
+        self.proto_consensus_source = "class"
+        self.proto_centroid_consensus_q = 0.0
+        self.use_proto_dist_logits = False
+        # Floor on the prototype-distance mixing weight. 0 leaves it free,
+        # which measured at 0.003: given the choice the optimiser ignores the
+        # stream. A positive floor forces a fixed minimum contribution, so
+        # the arm tests whether being held to the prototype geometry helps
+        # rather than whether the model elects to use it.
+        self.proto_dist_alpha_min = 0.0
+        # Permuted-prototype control for the stream above.
+        self.proto_dist_permute = False
+        self.mspp_merge_splits = True
+        self.aux_resid_cluster_k = 6
+        # Number of secondary tags in the subtype target vector. Must match
+        # the width of subtype_dist in the joined metadata.
+        self.aux_vad_subtype_dim = 16
+        # Join the per-annotator statistics onto the training corpus. Required
+        # by aux_vad_task="subtype" and by aux_vad_agreement_weight.
+        self.use_annotator_meta = False
+        # Scale each sample's auxiliary loss by 1 / (1 + mean annotator VAD
+        # std), so the head spends capacity on utterances whose target is a
+        # measurement rather than a summary of disagreement.
+        self.aux_vad_agreement_weight = False
         # Permuted-label control: replace each sample's cluster ID with a
         # deterministic pseudo-random label derived by hashing its VAD values.
         # Spatially white, so the aux task keeps its shape and difficulty but
@@ -362,6 +535,17 @@ class Config:
         # shifts the decision boundary rather than amplifying minority
         # gradients. Pair with class_weight_mode: none so imbalance is not
         # corrected twice.
+        # Class-dependent margin (LDAM, Cao et al. 2019). Distinct from
+        # inverse-frequency weighting: weighting corrects the prior and can
+        # be satisfied by shifting the boundary, whereas a margin demands
+        # the true class beat the others by a gap, which a shift cannot
+        # produce. Composes with class_weight_mode rather than replacing it.
+        self.use_ldam_margin = False
+        self.ldam_max_margin = 0.5
+        # LDAM assumes normalised logits at scale 30; this head is
+        # unnormalised, so lower values may be needed for stability.
+        self.ldam_scale = 30.0
+
         self.use_logit_adjustment = False
         self.logit_adjustment_tau = 1.0
 

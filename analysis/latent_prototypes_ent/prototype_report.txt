@@ -1,0 +1,130 @@
+Effective prototypes used per class (1.0 = no split, 3.0 = even usage)
+IEMO: neutral=2.66, happy=2.71, sad=2.34, angry=2.55
+MSPI: neutral=2.86, happy=2.93, sad=2.72, angry=2.47
+
+======================================================================
+IEMO
+======================================================================
+
+--- neutral (n=1708) ---
+  proto 0: n=332 (19%)  VAD V=0.500 A=0.437 D=0.461
+    terms: small, pass, likely, cable, anyhow, ones, particular, true, yours, must
+      > Fifty bucks. Mmhmm.
+      > Yeah.  I heard.
+  proto 1: n=972 (57%)  VAD V=0.491 A=0.407 D=0.431
+    terms: mmhmm, direct, breathing, guess, annie, list, coming, father, what's, cold
+      > Excuse me.
+      > Yeah.
+  proto 2: n=404 (24%)  VAD V=0.490 A=0.486 D=0.518
+    terms: record, settled, we'll, wanted, supervisor, manager, tonight, hotel, credit, deal
+      > Well what's the problem?  Let me change it.
+      > Clearly.  You know, do you have like a supervisor or something?
+
+--- happy (n=595) ---
+  proto 0: n=263 (44%)  VAD V=0.711 A=0.474 D=0.468
+    terms: might, moon, spot, after, view, quiet, fish, kiss, kissed, noticed
+      > Yeah.  Well.  You know, because he's leaving the next day.
+      > But we're going to have a honeymoon cruise.
+  proto 1: n=250 (42%)  VAD V=0.774 A=0.580 D=0.497
+    terms: laughter, into, utterly, life, charles, being, totally, exactly, climb, ridiculous
+      > Well Vegas was awesome.
+      > And, um, I got married.
+  proto 2: n=82 (14%)  VAD V=0.715 A=0.554 D=0.474
+    terms: since, sure, ready, long, kind, took, every, we're, wrong, day
+      > Yeah.  In the old town part.
+      > It was at the slot machines.
+
+--- sad (n=1084) ---
+  proto 0: n=105 (10%)  VAD V=0.291 A=0.463 D=0.487
+    terms: suppose, anything, survive, isn't, kids, mean, takes, toss, men, it's
+      > things just aren't what they seem.
+      > I don't know how you can be okay with this?  I don't know why you're not-- you're fine with it.
+  proto 1: n=272 (25%)  VAD V=0.352 A=0.357 D=0.425
+    terms: let's, great, floor, alright, thank, find, hey, loot, alone, over
+      > Did you get the mail? So you saw my letter?
+      > I don't know.  I put in that. request too. They didn't...
+  proto 2: n=707 (65%)  VAD V=0.302 A=0.393 D=0.465
+    terms: remember, kid, ashamed, last, gave, someone, lost, dancing, happy, rather
+      > Yeah.  I know.
+      > Just, you know, kicking myself.
+
+--- angry (n=1103) ---
+  proto 0: n=106 (10%)  VAD V=0.251 A=0.645 D=0.711
+    terms: larry, believe, missing, longer, new, single, newspapers, every, york, next
+      > Are there candid cameras?  Is this that movie? There's that show, right?  Airplane, airline.
+      > Then why is she still single?  New York is full of men, why is she still single?  Probably a hundred people to
+  proto 1: n=559 (51%)  VAD V=0.211 A=0.681 D=0.760
+    terms: ask, sick, insulting, listening, wicked, beast, tired, sadistic, bully, nobody
+      > That's out of control.
+      > I'm not frustrated.
+  proto 2: n=438 (40%)  VAD V=0.240 A=0.635 D=0.715
+    terms: swim, old, both, prove, chris, somewhere, should, inspire, nice, own
+      > I don't understand why this is so complicated for people when they get here.  It's just a simple form.  I just
+      > Oh.  I'm saving the environment. I'm riding this car because I- I want to.
+
+======================================================================
+MSPI
+======================================================================
+
+--- neutral (n=3501) ---
+  proto 0: n=814 (23%)  VAD V=0.502 A=0.697 D=0.479
+    terms: it'll, redo, gave, brought, sorry, rats, science, leave, face, gummy
+      > Okay got it. Right cool.
+      > Psychology. 8.30, you don't need to go to Psychology.How can I [crosstalk 00:04:53]
+  proto 1: n=1668 (48%)  VAD V=0.476 A=0.745 D=0.441
+    terms: hmm, ring, sound, echo, voices, whoa, sad, house, painting, outside
+      > I have to go to class. How can I not? Okay.
+      > ...going so far?It has been, I have been asleep not long enough.
+  proto 2: n=1019 (29%)  VAD V=0.488 A=0.681 D=0.493
+    terms: ella, jorgensen, made, listen, hours, tomorrow, pudding, fun, regardless, alan
+      > Yeah. I just rolled out of bed. I don't want to go to class today.
+      > I'm tired.Yeah you look really bad, why don't you just skip class, get some rest?
+
+--- happy (n=2629) ---
+  proto 0: n=1023 (39%)  VAD V=0.741 A=0.541 D=0.590
+    terms: carrier, insane, joey, finished, once, mail, grandmother, meeting, secret, hat
+      > No, I'm not ready.
+      > I don't care.
+  proto 1: n=997 (38%)  VAD V=0.799 A=0.466 D=0.633
+    terms: excited, amazing, congratulations, great, doing, weekend, wow, laughing, whoa, cute
+      > Oh god! We're supposed to be friends, you can't call me things like that. See it even says your friend in the 
+      > You put your mic on backwards, jeez.
+  proto 2: n=609 (23%)  VAD V=0.742 A=0.559 D=0.575
+    terms: blah, rock, scissors, shoot, bum, alright, sorry, quite, find, paper
+      > Oh, I'm sorry. I'll sit on my hand.
+      > Yeah. It's insane. Like, man, you got so little sleep last night. I know that your girlfriend was having a pan
+
+--- sad (n=879) ---
+  proto 0: n=122 (14%)  VAD V=0.253 A=0.656 D=0.442
+    terms: classes, terrible, bit, drop, any, totally, failing, rather, could, little
+      > [crosstalk 00:00:31] really tired.Oh, I'm so tired. I'm not looking forward to class this morning.Well, I mean
+      > I just got my midterm grades back. Did you get yours?Yeah, I did pretty well. What about-
+  proto 1: n=372 (42%)  VAD V=0.253 A=0.701 D=0.421
+    terms: finished, phone, meeting, scheduled, wednesday, since, grandmother, regardless, covered, ahead
+      > Hey Alan.
+      > How can I not.
+  proto 2: n=385 (44%)  VAD V=0.242 A=0.670 D=0.455
+    terms: because, money, shoes, god, open, else, couldn't, gosh, sorry, away
+      > Oh you know, just a little bit tired. Everything's good though.
+      > Ugh, John isn't taking notes for me this morning, so I have to go to Chemistry.
+
+--- angry (n=789) ---
+  proto 0: n=61 (8%)  VAD V=0.268 A=0.461 D=0.615
+    terms: love, great, always, birthday, pudding, puppy, we're, come, it's, make
+      > Not. It's going to be on my attendance and that could be the difference between an A and a B.
+      > No, I didn't bring my ID.
+  proto 1: n=324 (41%)  VAD V=0.234 A=0.410 D=0.661
+    terms: thought, inquisitive, once, ella, food, post, shows, preliminary, study, than
+      > I can't skip class. What are you talking about?
+      > I don't know. Just it's really not that big of a deal.
+  proto 2: n=404 (51%)  VAD V=0.251 A=0.461 D=0.624
+    terms: inaudible, listen, mean, let's, feel, hear, echo, voices, sound, joined
+      > Well, I don't think it's really a big deal.No, it is a really big deal.
+      > Yeah, well I'm going to go to class. It's going to suck, but I'm going to go.Okay.
+
+
+Cross-corpus replication of prototype VAD profiles
+neutral: spread IEMO=0.080 MSPI=0.064 ordering_matches=False
+happy: spread IEMO=0.106 MSPI=0.094 ordering_matches=False
+sad: spread IEMO=0.106 MSPI=0.046 ordering_matches=False
+angry: spread IEMO=0.046 MSPI=0.051 ordering_matches=False

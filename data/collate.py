@@ -3,6 +3,7 @@
 Custom collate functions for VAD regression and variable-length waveform padding
 """
 
+import numpy as np
 import torch
 
 
@@ -36,6 +37,7 @@ def vad_collate_fn(batch):
     has_difficulty = 'difficulty' in batch[0]
     has_speaker = 'speaker' in batch[0]
     has_label4 = 'label4' in batch[0]
+    has_annot = 'annot_mask' in batch[0]
 
     if has_features:
         collated['features'] = []
@@ -52,6 +54,12 @@ def vad_collate_fn(batch):
         collated['speaker'] = []
     if has_label4:
         collated['label4'] = []
+    if has_annot:
+        collated['subtype_dist'] = []
+        collated['annot_vad_std'] = []
+        collated['annot_consensus'] = []
+        collated['label_dist'] = []
+        collated['annot_mask'] = []
     has_sample_index = 'sample_index' in batch[0]
     if has_sample_index:
         collated['sample_index'] = []
@@ -90,6 +98,12 @@ def vad_collate_fn(batch):
             collated['speaker'].append(item['speaker'])
         if has_label4:
             collated['label4'].append(item['label4'])
+        if has_annot:
+            collated['subtype_dist'].append(item['subtype_dist'])
+            collated['annot_vad_std'].append(item['annot_vad_std'])
+            collated['annot_consensus'].append(item['annot_consensus'])
+            collated['label_dist'].append(item['label_dist'])
+            collated['annot_mask'].append(item['annot_mask'])
         if has_sample_index:
             collated['sample_index'].append(item['sample_index'])
 
@@ -106,6 +120,23 @@ def vad_collate_fn(batch):
     if has_sample_index:
         collated['sample_index'] = torch.tensor(
             collated['sample_index'], dtype=torch.long,
+        )
+
+    if has_annot:
+        collated['subtype_dist'] = torch.tensor(
+            np.stack(collated['subtype_dist']), dtype=torch.float32,
+        )
+        collated['annot_vad_std'] = torch.tensor(
+            np.stack(collated['annot_vad_std']), dtype=torch.float32,
+        )
+        collated['annot_consensus'] = torch.tensor(
+            collated['annot_consensus'], dtype=torch.float32,
+        )
+        collated['label_dist'] = torch.tensor(
+            np.stack(collated['label_dist']), dtype=torch.float32,
+        )
+        collated['annot_mask'] = torch.tensor(
+            collated['annot_mask'], dtype=torch.float32,
         )
 
     collated['label'] = torch.stack(collated['label'])

@@ -1,0 +1,28 @@
+Checkpoint: pa_off_seed42_seed42.pt
+
+==================================================================
+SAMSEMO
+==================================================================
+
+counts (rows = true, cols = predicted)
+           neutral     happy       sad     angry
+ neutral      1202       409       356       246
+   happy       431      1188       151       166
+     sad        67        22       221        27
+   angry        53        49        39       416
+
+row-normalized (recall)
+           neutral     happy       sad     angry
+ neutral     0.543     0.185     0.161     0.111
+   happy     0.223     0.614     0.078     0.086
+     sad     0.199     0.065     0.656     0.080
+   angry     0.095     0.088     0.070     0.747
+
+column-normalized (what a prediction really was)
+           neutral     happy       sad     angry
+ neutral     0.686     0.245     0.464     0.288
+   happy     0.246     0.712     0.197     0.194
+     sad     0.038     0.013     0.288     0.032
+   angry     0.030     0.029     0.051     0.487
+
+emotional utterances predicted neutral: 551 / 2830 (19.5%)

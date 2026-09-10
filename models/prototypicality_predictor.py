@@ -23,14 +23,36 @@ class PrototypicalityPredictor(nn.Module):
     Target: actual difficulty = euclidean_dist(sample_VAD, class_centroid_VAD)
     """
 
-    def __init__(self, input_dim=1024, hidden_dim=256):
+    def __init__(self, input_dim=1024, hidden_dim=256, output_dim=1):
+        """
+        Args:
+            input_dim: width of the shared embedding.
+            hidden_dim: width of the hidden layer.
+            output_dim: 1 for a scalar distance, 3 for the VAD residual,
+                or num_classes * clusters_per_class for subtype logits.
+                A scalar collapses a 3-D position into one number, so a
+                sample that is atypical because it is loud and one that is
+                atypical because it is quiet receive the same target; the
+                wider variants keep that direction.
+        """
         super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 1),
-        )
+        self.output_dim = int(output_dim)
+        if int(hidden_dim) <= 0:
+            # Linear probe. The head's job is not to predict the target well,
+            # it is to force the SHARED embedding to carry the information. A
+            # wider head can fit the target from whatever the embedding
+            # already holds, which shrinks the gradient reaching the trunk and
+            # lets the head absorb the task. A linear head cannot, so the only
+            # way to reduce the loss is for the embedding itself to become
+            # more informative.
+            self.head = nn.Linear(input_dim, self.output_dim)
+        else:
+            self.head = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_dim, self.output_dim),
+            )
 
     def forward(self, embeddings):
         """
@@ -38,6 +60,7 @@ class PrototypicalityPredictor(nn.Module):
             embeddings: [batch, input_dim] shared backbone embeddings
 
         Returns:
-            [batch] predicted prototypicality scores
+            [batch] when output_dim is 1, otherwise [batch, output_dim].
         """
-        return self.head(embeddings).squeeze(-1)
+        out = self.head(embeddings)
+        return out.squeeze(-1) if self.output_dim == 1 else out

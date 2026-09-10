@@ -1,0 +1,28 @@
+% Hand-written from the verified literature sweep, NOT generated. Every row
+% traces to a retrieved source; see paper/LITERATURE_NOTES.md for the audit.
+%
+% Deliberately split into two blocks. No published, verifiable result reports
+% MSP-Podcast -> IEMOCAP zero-shot four-class UAR, so the first block fixes
+% the class set and metric while the second fixes the corpus pair. No single
+% prior row does both, which is why our result has no direct comparison.
+\begin{tabular}{llllr}
+\toprule
+Work & Train $\rightarrow$ Test & Task & Metric & Score \\
+\midrule
+\multicolumn{5}{l}{\emph{Zero-shot, four-class categorical (class set matches ours; source corpus differs)}} \\
+\cite{ma2024emobox} WavLM-L    & MELD $\rightarrow$ IEMOCAP    & 4-way & Acc & 48.59 \\
+\cite{ma2024emobox} Whisper-L  & MELD $\rightarrow$ IEMOCAP    & 4-way & Acc & 46.14 \\
+\cite{ma2024emobox} WavLM-B    & SAVEE $\rightarrow$ IEMOCAP   & 4-way & Acc & 39.40 \\
+\cite{ma2024emobox} w2v2-B     & MELD $\rightarrow$ IEMOCAP    & 4-way & Acc & 29.78 \\
+\midrule
+\multicolumn{5}{l}{\emph{Zero-shot, MSP-Podcast $\rightarrow$ IEMOCAP (corpus pair matches ours; task differs)}} \\
+\cite{wagner2023dawn}   & MSP-P $\rightarrow$ IEMOCAP & dim. (aro) & CCC & 0.663 \\
+\cite{wagner2023dawn}   & MSP-P $\rightarrow$ IEMOCAP & dim. (val) & CCC & 0.448 \\
+\cite{tavernor2025more} & MSP-P $\rightarrow$ IEMOCAP & dim. (act) & CCC$_{\mathrm{agg}}$ & 0.629 \\
+\cite{tavernor2025more} & MSP-P $\rightarrow$ IEMOCAP & dim. (val) & CCC$_{\mathrm{agg}}$ & 0.505 \\
+\midrule
+\multicolumn{5}{l}{\emph{This work}} \\
+Baseline          & MSP-P $\rightarrow$ IEMOCAP & 4-way & UAR & 60.22 \\
+Ours              & MSP-P $\rightarrow$ IEMOCAP & 4-way & UAR & 60.83 \\
+\bottomrule
+\end{tabular}

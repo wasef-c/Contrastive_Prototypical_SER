@@ -1,0 +1,204 @@
+Discovered emotion categories: per-cluster description.
+Purity is the fraction of the cluster holding its dominant
+label. High purity with an emotion spread across several
+clusters is the subtype signature.
+
+==============================================================================
+MSPP: 12 discovered categories
+==============================================================================
+
+cluster 9  n=3326  dominant=neutral (purity 0.47)
+  composition: neutral 47%, happy 24%, sad 12%, angry 16%
+  mean VAD:    V=0.466 A=0.521 D=0.569
+  terms:       expectation, hopes, ways, demons, articles, defend, options, adoption, other, adolescent, tactics, riders
+    > ... that sometimes moral rhetoric can hide economic interests, which i think is true to our present day.speaking of bringing projects into t...
+    > ... reasons. so it might only just take away one of the reasons that you might be bringing to try and prove your case for liability under st...
+    > ) [inaudible 00:05:19] google and yahoo mirror their data around the globe so that wherever you are, it's not going to take very long to get...
+
+cluster 1  n=2956  dominant=neutral (purity 0.46)
+  composition: neutral 46%, happy 31%, sad 7%, angry 16%
+  mean VAD:    V=0.493 A=0.558 D=0.591
+  terms:       managers, waterloo, vote, folks, levels, gathered, monogamy, campus, political, joining, employees, grab
+    > you can cut this a bunch of different ways. one thing we've already covered is that we know, except in potentially in isolated sectors like ...
+    > we ask for sort of clarifying or sort of repeat the questions as well. so, hopefully it should be okay. and i apologize if it's a little ann...
+    > communicating over zoom is hard enough, but when you throw out the whiteboard feature, it gets a lot harder.absolutely. i just want to comme...
+
+cluster 0  n=2177  dominant=neutral (purity 0.47)
+  composition: neutral 47%, happy 26%, sad 13%, angry 14%
+  mean VAD:    V=0.475 A=0.509 D=0.558
+  terms:       integrate, deanna, porn, rocks, forced, fleming, lets, tech, becoming, printing, blind, beaten
+    > how that worked... and then when we can, we bring in whole plants or whole products as opposed to the leaves of something so that they can s...
+    > women that only we can uplift each other in a special way. but, i want to look at it from the other side, maybe play a little devil's advoca...
+    > or too many people. and, the flip side of that is this hand drawn look really gives it a human touch, compared to maybe using some kind of g...
+
+cluster 6  n=2161  dominant=neutral (purity 0.53)
+  composition: neutral 53%, happy 23%, sad 12%, angry 12%
+  mean VAD:    V=0.462 A=0.492 D=0.544
+  terms:       wink, nudge, overseas, donegal, acronym, understood, explains, oversight, commodification, eric, successful, weekend
+    > patriotism doesn't mean the same thing that it meant when such a word was needed during times of war, for example.
+    > can we apply the... was this said by a salafist mullah or idw genius brain? question two: it's getting to be quite a lot of them-
+    > exactly right. and one of the things we want to make sure is that once a family has a scholarship and a good situation for their child,
+
+cluster 5  n=2046  dominant=neutral (purity 0.40)
+  composition: neutral 40%, happy 34%, sad 8%, angry 18%
+  mean VAD:    V=0.495 A=0.567 D=0.582
+  terms:       pollution, seller, leap, don't, basketball, she's, handling, feather, cats, fees, ring, pittsburgh
+    > someone put it to me quite succinctly. whereas, he takes this formula that works really well at a time when you have a lot of genuine econom...
+    > [inaudible 00:00:36].i mean, it wasn't that long after the film so it's like she wasn't even really trying to cement her career in hollywood...
+    > which is like, you've just made that decision, okay, i'm going to simplify. i'm going to minimize what i'm doing. and i think a lot of us ar...
+
+cluster 10  n=1866  dominant=neutral (purity 0.39)
+  composition: neutral 39%, happy 31%, sad 6%, angry 24%
+  mean VAD:    V=0.475 A=0.592 D=0.616
+  terms:       yada, united, states, welcome, flare, brady, gandalf's, lager, wfo, dysfunction, corporon, vlog
+    > ... dianne reeves after dave. so if you want to share a thought, ask a question, we invite you to participate and your being standing at the...
+    > ... idea about botany. you see the flowers and you're very happy to grasp at them, my flowers. but then you think, "who put weeds in my gard...
+    > ... back over. so again, if you look at the dates, the one where there's multiple visits, if the cops at any point said, "this dude's beatin...
+
+cluster 3  n=1714  dominant=neutral (purity 0.56)
+  composition: neutral 56%, happy 21%, sad 17%, angry 6%
+  mean VAD:    V=0.466 A=0.439 D=0.493
+  terms:       clump, oreo, amen, tormund, oscar, quotes, luckily, tested, mdma, bubble, brain, bye
+    > i just wanted to get that, say that, before we keep going. first of all, as another aside.
+    > oreo. kanaki likes to sleep earlier than oreo, and oreo, he likes to move around at night.
+    > well, thanks for sharing, man-yeah, [crosstalk 00:03:11].... about nikki's sousaphone playing. i'm sure she's really going to be happy that ...
+
+cluster 2  n=1466  dominant=happy (purity 0.42)
+  composition: neutral 29%, happy 42%, sad 5%, angry 24%
+  mean VAD:    V=0.509 A=0.612 D=0.605
+  terms:       halfway, bro, jared, collectivist, snitch, taxpayer, plemon, y'all, shit, bam, alex, fuck
+    > ...and he's not being superficial talking about the little ponytail in this or that. what's up with stereotyping? have you dated all black w...
+    > absolutely. morning crowd. ...they're getting showered. we were getting, as baltimore artists, we were getting played. [ciel de show 00:06:3...
+    > that's what i'm talking about. well, on his way to a billion baby! yeah. let's do this! let's do this so they can make a sequel. and maybe w...
+
+cluster 7  n=788  dominant=neutral (purity 0.52)
+  composition: neutral 52%, happy 26%, sad 15%, angry 7%
+  mean VAD:    V=0.477 A=0.476 D=0.510
+  terms:       pew, binging, bruh, extra, likes, shame, liked, feel, purpose, shape, art, reach
+    > ... to any of you. where you really get exciting, i think, with hyperdocs, is the way you can then use the hyperdoc-
+    > ... the oc, it just kind of happens. and it's only now looking back that you can be like, oh actually, no.i feel like at the time that's wha...
+    > the journalist, she did her very best to account my story, but there's this little bit of a glitch in there in terms of the timeline-
+
+cluster 11  n=718  dominant=neutral (purity 0.50)
+  composition: neutral 50%, happy 19%, sad 14%, angry 17%
+  mean VAD:    V=0.428 A=0.479 D=0.527
+  terms:       morons, where's, hello, christ, uncomfortable, yours, near, eventually, bank, major, empty, privacy
+    > and the korean war started in the summer of '50 while i was at the surveying camp. so-
+    > every time charles kennedy makes a comment, everybody has to drink. that's the drinking game. he's going to comment.
+    > ... the parent that doesn't help anyone. i think it all boils down to how fucking hard this is.
+
+cluster 4  n=420  dominant=neutral (purity 0.58)
+  composition: neutral 58%, happy 16%, sad 15%, angry 10%
+  mean VAD:    V=0.448 A=0.434 D=0.495
+  terms:       paw, light, sick, loved, needed, dead, believe, step, makes, don't, man, baby
+    > you won't even believe it. and they're... but they're very entertaining. i like them. they're cool.
+    > it's hard.it's hard to aim down.
+    > first, is there anybody who's been to this workshop before?
+
+cluster 8  n=362  dominant=happy (purity 0.94)
+  composition: neutral 6%, happy 94%, sad 0%, angry 1%
+  mean VAD:    V=0.713 A=0.660 D=0.628
+  terms:       drama, boss, roll, key, hell, mike, inaudible, sorry, exactly, anyway, john, i'm
+    > "hey, bond. it's me, goldfinger. i did this."
+    > .. let's move here. and he'll say something like, "oh well-
+    > well, all right, there we go. if we have a great explanation, we can just stop.two minutes in.so let's start...
+
+==============================================================================
+IEMO: 12 discovered categories
+==============================================================================
+
+cluster 9  n=981  dominant=angry (purity 0.40)
+  composition: neutral 35%, happy 14%, sad 11%, angry 40%
+  mean VAD:    V=0.391 A=0.599 D=0.644
+  terms:       waiting, never, three, beach, bag, show, hands, cruel, you're, fill, hour, kids
+    > You're kidding me, right.  You're going to give me fifty dollars to completely cover my bag, everything that was in it, the inconvenience th...
+    > Well, welcome to the human race.  Do you think this is what I had in mind when I proposed?  That four years down the road, we'd be at the be...
+    > Okay.  Is it being- Is it being compressed between anything by any chance?  Because sometimes your connection can be you know, disrupted by,...
+
+cluster 1  n=640  dominant=sad (purity 0.41)
+  composition: neutral 22%, happy 16%, sad 41%, angry 21%
+  mean VAD:    V=0.384 A=0.521 D=0.568
+  terms:       cracked, changed, dad, responsibility, crack, looked, guys, ashamed, avoid, they'd, suckers, accident
+    > I mean, that's-that's only a little thing, but that's the kind of guys I had. They didn't just die. They killed themselves for each other. A...
+    > You whispered the sweetest, most intimate things to me right into my ear so I could feel them as much as hear them.  And I remember thinking...
+    > It's PR.  I mean, somebody sold you a good bill about this wonderful event that going to happen on the beach.
+
+cluster 11  n=605  dominant=neutral (purity 0.47)
+  composition: neutral 47%, happy 14%, sad 8%, angry 31%
+  mean VAD:    V=0.427 A=0.523 D=0.559
+  terms:       direct, worked, second, known, liked, yourself, use, girl, give, license, taking, weak
+    > We're trying to have a conversation and you seem extremely hostile. You keep cutting me off.
+    > L.A. is really hard.  I mean, have you tried like just going into a bar a couple of times to make friends with people who work there? and
+    > You know, the airlines can not be held responsible for every bag of luggage that comes through here.
+
+cluster 6  n=494  dominant=neutral (purity 0.40)
+  composition: neutral 40%, happy 9%, sad 19%, angry 32%
+  mean VAD:    V=0.384 A=0.506 D=0.546
+  terms:       sara, must, act, sees, view, don't, help, annie, strong, dies, turn, hit
+    > I want you to be okay with it as much as you can be.  I mean it's not a great situation but we don't have an option here.
+    > Am I going to be getting, like, free tickets, free mileage. When can I expect my bag here?
+    > Well, that's a good reason.  But it don't mean a thing. I mean, You haven't seen her since you went to war.  It's been five years.
+
+cluster 2  n=333  dominant=neutral (purity 0.43)
+  composition: neutral 43%, happy 21%, sad 3%, angry 34%
+  mean VAD:    V=0.493 A=0.516 D=0.536
+  terms:       shut, brent, amanda, sting, kidding, cool, laughter, snap, listen, forget, garbage, hey
+    > Okay, let me get him.Oh, guess who the supervisor is? It's me.
+    > What?  Who says that?  Bananas don't grow overnight.
+    > Tell them my name.  My name is Brent Backersen.
+
+cluster 5  n=326  dominant=sad (purity 0.54)
+  composition: neutral 31%, happy 11%, sad 54%, angry 4%
+  mean VAD:    V=0.408 A=0.367 D=0.427
+  terms:       figured, saw, mention, loved, guess, how's, wish, leave, alright, alone, included, knew
+    > You're the one who probably wishes he was with somebody else.  Somebody who doesn't take things so seriously, who could enjoy herself.
+    > It takes a little while to toss that off. Because they weren't just men.
+    > I told myself finally, this is how happy I'm supposed to be.
+
+cluster 7  n=301  dominant=sad (purity 0.62)
+  composition: neutral 27%, happy 9%, sad 62%, angry 1%
+  mean VAD:    V=0.399 A=0.317 D=0.383
+  terms:       glad, geez, cried, sorry, breathing, awhile, close, tough, cold, guess, pretty, brother
+    > Yeah. God, I loved that kid.
+    > I noticed that. It's beautiful.
+    > No, you don't. I'm a pretty tough guy.
+
+cluster 8  n=268  dominant=neutral (purity 0.51)
+  composition: neutral 51%, happy 9%, sad 34%, angry 7%
+  mean VAD:    V=0.440 A=0.381 D=0.415
+  terms:       bother, settled, thanks, floor, almost, too, talk, what's, hear, best, many, annie
+    > It just doesn't seem fair.
+    > I wanted to get this settled first.
+    > Is there a funeral planned? or-
+
+cluster 10  n=217  dominant=neutral (purity 0.59)
+  composition: neutral 59%, happy 20%, sad 6%, angry 14%
+  mean VAD:    V=0.519 A=0.462 D=0.442
+  terms:       laughter, hmm, mmhmm, sir, garbage, sure, huh, alright, understand, you're, thank, don't
+    > -- it's a biohazard. so- um
+    > Yeah, it really is.
+    > Uh, huh. I mean, you know, it's spring--It'll be--
+
+cluster 3  n=159  dominant=neutral (purity 0.44)
+  composition: neutral 44%, happy 14%, sad 13%, angry 29%
+  mean VAD:    V=0.442 A=0.452 D=0.476
+  terms:       bye, since, hell, fine, every, thanks, day, you've, help, i'll, didn't, don't
+    > Well, they tip well.
+    > Great.  How many seats?
+    > I'll have a little, I think.
+
+cluster 4  n=96  dominant=sad (purity 0.57)
+  composition: neutral 36%, happy 4%, sad 57%, angry 2%
+  mean VAD:    V=0.421 A=0.309 D=0.319
+  terms:       mmhmm, breathing, hmm, sure
+    > Yeah.
+    > Yeah.
+    > No.
+
+cluster 0  n=70  dominant=neutral (purity 0.56)
+  composition: neutral 56%, happy 11%, sad 23%, angry 10%
+  mean VAD:    V=0.485 A=0.349 D=0.390
+  terms:       sure
+    > Yeah.
+    > Yeah?
+    > yeah.

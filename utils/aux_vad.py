@@ -416,3 +416,162 @@ def batch_scrambled_ids_and_mask(
 
     mask = _batch_vad_mask(batch, cluster_ids.shape[0], device)
     return cluster_ids, mask
+
+
+def _whitened_residuals(
+    train_data: Sequence[dict],
+    means: np.ndarray,
+    whiten: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, list]:
+    """Whitened residual of every VAD-annotated training sample.
+
+    The residual is taken from the sample's OWN class centre and whitened by
+    that class's covariance, so its norm is the Mahalanobis distance and its
+    direction says which way the sample deviates. Because the class centre is
+    subtracted, the same residual means the same thing in every class: a large
+    positive arousal component is "louder than this emotion normally is",
+    whether the emotion is sadness or happiness.
+
+    Args:
+        train_data: list of dataset item dicts.
+        means: [C, 3] fitted class centres.
+        whiten: [C, 3, 3] Cholesky factors of the inverse covariances.
+
+    Returns:
+        residuals: [M, 3] whitened residuals.
+        labels: [M] class ids aligned with residuals.
+        indices: positions in train_data that contributed.
+    """
+    vals, labs, idx = [], [], []
+    for i, item in enumerate(train_data):
+        if item.get("dataset") not in DATASETS_WITH_VAD:
+            continue
+        c = int(item["label"])
+        if c < 0 or c >= means.shape[0]:
+            continue
+        vals.append([float(item["valence"]), float(item["arousal"]),
+                     float(item["dominance"])])
+        labs.append(c)
+        idx.append(i)
+
+    if not vals:
+        return (np.zeros((0, 3), dtype=np.float32),
+                np.zeros(0, dtype=np.int64), [])
+
+    vad = np.asarray(vals, dtype=np.float64)
+    labels = np.asarray(labs, dtype=np.int64)
+    resid = vad - means[labels]
+    for c in np.unique(labels):
+        m = labels == c
+        resid[m] = resid[m] @ whiten[int(c)]
+    return resid.astype(np.float32), labels, idx
+
+
+def build_residual_centroids(
+    train_data: Sequence[dict],
+    means: np.ndarray,
+    whiten: np.ndarray,
+    k: int,
+    num_classes: int,
+    scope: str = "shared",
+    seed: int = 42,
+) -> np.ndarray:
+    """Fit k-means over whitened residuals rather than raw VAD.
+
+    Two scopes, and the difference between them is the whole experiment:
+
+    "shared" pools the residuals of every class and fits one k-means over
+    them. A cluster is then a MODE OF DEVIATION that is not tied to any
+    emotion: samples from different classes land in the same cluster when
+    they depart from their own prototype in the same direction. No clustering
+    of raw VAD can express that, because there the cluster identity is
+    recoverable from absolute position and therefore largely from the class.
+
+    "per_class" fits a separate k-means inside each class's residuals. Since
+    k-means is translation invariant, this differs from clustering that
+    class's raw VAD only by the whitening, which makes it the control that
+    isolates the metric change from the sharing.
+
+    Args:
+        train_data: list of dataset item dicts.
+        means: [C, 3] fitted class centres.
+        whiten: [C, 3, 3] Cholesky factors of the inverse covariances.
+        k: clusters. Total for "shared", per class for "per_class".
+        num_classes: number of primary classes.
+        scope: "shared" or "per_class".
+        seed: k-means random state.
+
+    Returns:
+        [k, 3] centroids for "shared", or [num_classes, k, 3] for "per_class".
+    """
+    resid, labels, _ = _whitened_residuals(train_data, means, whiten)
+
+    if scope == "per_class":
+        centroids = np.zeros((num_classes, k, 3), dtype=np.float32)
+        for c in range(num_classes):
+            pts = resid[labels == c]
+            if pts.shape[0] < k:
+                centroids[c] = np.tile(
+                    pts.mean(axis=0) if pts.shape[0] else np.zeros(3), (k, 1))
+                continue
+            km = KMeans(n_clusters=k, random_state=seed + c, n_init=10)
+            km.fit(pts)
+            centroids[c] = km.cluster_centers_.astype(np.float32)
+        return centroids
+
+    if resid.shape[0] < k:
+        return np.zeros((k, 3), dtype=np.float32)
+    km = KMeans(n_clusters=k, random_state=seed, n_init=10)
+    km.fit(resid)
+    return km.cluster_centers_.astype(np.float32)
+
+
+def batch_residual_cluster_ids_and_mask(
+    batch: dict,
+    centroids: torch.Tensor,
+    means: torch.Tensor,
+    whiten: torch.Tensor,
+    device: torch.device,
+    scope: str = "shared",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return (residual cluster IDs, mask) for a batch.
+
+    Computed in-batch from VAD and label rather than looked up, so the target
+    stays correct under any sampler or split without a per-sample table.
+
+    Args:
+        batch: collated batch with 'valence', 'arousal', 'dominance', 'label',
+            'dataset'.
+        centroids: [k, 3] for shared scope, [C, k, 3] for per_class.
+        means: [C, 3] class centres on `device`.
+        whiten: [C, 3, 3] Cholesky factors on `device`.
+        device: torch device for outputs.
+        scope: "shared" or "per_class".
+
+    Returns:
+        cluster_ids: [B] LongTensor. For per_class scope the id is flattened
+            as label * k + local so the head sees one contiguous range.
+        mask: [B] float tensor, 1.0 for samples from VAD-annotated corpora.
+    """
+    valence = batch["valence"].to(device).float()
+    arousal = batch["arousal"].to(device).float()
+    dominance = batch["dominance"].to(device).float()
+    points = torch.stack([valence, arousal, dominance], dim=1)      # [B, 3]
+    labels = batch["label"].to(device).long()                       # [B]
+
+    # Whitened residual from the sample's own class centre.
+    centred = points - means[labels]                                # [B, 3]
+    resid = torch.bmm(centred.unsqueeze(1), whiten[labels]).squeeze(1)
+
+    if scope == "per_class":
+        k = centroids.shape[1]
+        own = centroids[labels]                                     # [B, k, 3]
+        diff = resid.unsqueeze(1) - own
+        local = (diff * diff).sum(dim=-1).argmin(dim=-1).long()
+        cluster_ids = labels * k + local
+    else:
+        diff = resid.unsqueeze(1) - centroids.unsqueeze(0)          # [B, k, 3]
+        cluster_ids = (diff * diff).sum(dim=-1).argmin(dim=-1).long()
+
+    mask = _batch_vad_mask(batch, cluster_ids.shape[0], device)
+    return cluster_ids, mask

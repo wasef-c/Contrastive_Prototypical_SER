@@ -8,7 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.encoder import FrozenBERTEncoder
-from models.audio_encoder import Wav2Vec2Encoder, Emotion2VecEncoder
+from models.audio_encoder import (Emotion2VecEncoder, Wav2Vec2Encoder,
+                                  WavLMEncoder)
 from models.attention_pool import AttentionPool, MeanPoolControl
 from models.fusion import get_fusion_module
 
@@ -60,9 +61,15 @@ class EmotionClassifier(nn.Module):
         use_salience_gate=False,
         aux_vad_cluster_k=8,
         aux_vad_head_depth=1,
+        aux_vad_subtype_dim=16,
+        aux_resid_cluster_k=6,
         aux_vad_task="cluster",
         aux_vad_cluster_scope="global",
         aux_vad_clusters_per_class=2,
+        use_proto_dist_logits=False,
+        proto_dist_alpha_min=0.0,
+        use_detector_fusion=False,
+        detector_fusion_dim=128,
     ):
         super().__init__()
 
@@ -122,6 +129,18 @@ class EmotionClassifier(nn.Module):
                 unfreeze_layers=unfreeze_audio_layers,
             )
             self.audio_dim = self.audio_encoder.get_output_dim()
+        elif audio_encoder_type == "wavlm" and modality in ["audio", "both"]:
+            # General-purpose SSL contrast against emotion2vec's
+            # emotion-specific pretraining. Honours audio_pooling so the two
+            # encoders can be compared at the same width: under "frames" both
+            # hand the fusion a time axis and share the attention pooler,
+            # instead of WavLM mean-pooling to 768 against emotion2vec's 3072.
+            self.audio_encoder = WavLMEncoder(
+                model_name=audio_model_name,
+                unfreeze_layers=unfreeze_audio_layers,
+                pooling=audio_pooling,
+            )
+            self.audio_dim = self.audio_encoder.get_output_dim()
         elif audio_encoder_type == "emotion2vec" and modality in ["audio", "both"]:
             self.audio_encoder = Emotion2VecEncoder(
                 model_name=audio_model_name,
@@ -172,6 +191,32 @@ class EmotionClassifier(nn.Module):
         else:
             raise ValueError(f"Unknown modality: {modality}")
 
+        # Feature-level detector fusion. A presence branch hangs off the shared
+        # embedding and predicts neutral-vs-emotional, and its hidden
+        # representation is concatenated into the classification head's input.
+        # The four-way head therefore sees what the detector computed, not what
+        # it decided, which is the difference from stacking on logits: a
+        # decision-level combiner can only re-rank four numbers, while this one
+        # can use presence evidence that never survived the detector's own
+        # softmax.
+        self.use_detector_fusion = bool(use_detector_fusion)
+        if self.use_detector_fusion:
+            det_dim = int(detector_fusion_dim)
+            self.detector_branch = nn.Sequential(
+                nn.Linear(hidden_dim, det_dim),
+                nn.LayerNorm(det_dim),
+                nn.ReLU(),
+            )
+            self.detector_head = nn.Linear(det_dim, 2)
+            # Rebuild the head to accept the widened input. The modality build
+            # above already created a hidden_dim-wide one.
+            self.output_layer = nn.Sequential(
+                nn.Dropout(self.dropout_rate),
+                nn.Linear(hidden_dim + det_dim, self.output_dim),
+            )
+            print(f"   Detector fusion: branch {hidden_dim} -> {det_dim}, "
+                  f"head input {hidden_dim + det_dim} -> {self.output_dim}")
+
         # Projection head for contrastive learning (separate from classifier)
         # Maps embeddings to a lower-dim space where contrastive loss operates
         # Classification head still uses the raw embeddings
@@ -211,12 +256,68 @@ class EmotionClassifier(nn.Module):
             self.salience_gate_b = nn.Parameter(torch.zeros(1))
             print("   Salience gate: predicted-VAD intensity -> neutral logit "
                   "(2 learned params, init 0)")
+        self.use_proto_dist_logits = bool(use_proto_dist_logits)
+        if self.use_proto_dist_logits:
+            # Nearest-prototype classifier in whitened VAD space, fused into
+            # the logits and trained end to end.
+            #
+            # Motivation from measurement: the auxiliary residual head raised
+            # emotion-vs-emotion AUC on 8/8 corpus-regime cells while UAR
+            # stayed flat, i.e. the signal reached the representation but not
+            # the argmax, and post-hoc calibration fitted on the training
+            # corpus never transferred. This is the remaining option: make the
+            # prototype distance part of the forward path of the decision, so
+            # gradient descent places the boundary with the distance already
+            # in hand rather than a correction being bolted on afterwards.
+            #
+            # Distances are computed from PREDICTED VAD, which needs no label,
+            # so the stream is well defined at test time on corpora with no
+            # VAD annotation at all.
+            self.register_buffer("proto_dist_means",
+                                 torch.zeros(num_classes, 3))
+            self.register_buffer("proto_dist_whiten",
+                                 torch.eye(3).repeat(num_classes, 1, 1))
+            # Mixing weight. Two regimes.
+            #
+            # alpha_min == 0: a free scalar initialised to zero, so at init
+            # the arm is exactly the baseline and any deviation is the stream
+            # having earned weight. Measured this way the optimiser drove it
+            # to 0.003, i.e. it declined to use the stream at all.
+            #
+            # alpha_min > 0: alpha = alpha_min + softplus(raw), so the stream
+            # is guaranteed a floor and can only grow from there. This asks a
+            # different question: not whether the model chooses the prototype
+            # geometry, but whether being held to it helps. A fixed
+            # contribution constrains the decision rule the same way a prior
+            # does, which can regularise even when the free version is
+            # ignored. The raw parameter starts near -6 so softplus is about
+            # 0.002 and alpha begins essentially at the floor.
+            self.proto_dist_alpha_min = float(proto_dist_alpha_min)
+            init = (torch.zeros(1) if self.proto_dist_alpha_min <= 0
+                    else torch.full((1,), -6.0))
+            self.proto_dist_alpha = nn.Parameter(init)
+            print(f"   Prototype-distance logit stream: {num_classes} "
+                  f"whitened prototypes, alpha_min="
+                  f"{self.proto_dist_alpha_min:g}"
+                  f"{' (free, init 0)' if self.proto_dist_alpha_min <= 0 else ' (floored)'}")
+
         if use_aux_vad_cluster:
             # Regression variant predicts (V, A, D) directly. Cluster variant
             # predicts one of k cluster IDs, where per-class scope gives
             # num_classes * clusters_per_class subtype labels.
             if aux_vad_task == "regression":
                 k_out = 3
+            elif aux_vad_task == "resid_cluster":
+                # Deviation modes over whitened residuals. Shared scope gives
+                # k class-independent modes; per-class scope refines each
+                # class separately and so needs num_classes * k logits.
+                k_res = int(aux_resid_cluster_k)
+                k_out = (int(num_classes) * k_res
+                         if aux_vad_cluster_scope == "per_class" else k_res)
+            elif aux_vad_task == "subtype":
+                # Annotator-supplied secondary tags: a multi-label target, so
+                # one logit per tag rather than a softmax over cluster ids.
+                k_out = int(aux_vad_subtype_dim)
             elif aux_vad_cluster_scope == "per_class":
                 k_out = int(num_classes) * int(aux_vad_clusters_per_class)
             else:
@@ -316,7 +417,7 @@ class EmotionClassifier(nn.Module):
         elif self.modality == "text":
             return self._forward_text(text_input_ids, text_attention_mask, return_embeddings)
         elif self.modality == "both":
-            if not self.use_salience_gate:
+            if not self.use_salience_gate and not self.use_proto_dist_logits:
                 return self._forward_multimodal(audio_features, text_input_ids, text_attention_mask,
                                                 return_embeddings, detach_modal_features=detach_modal_features)
             # The gate needs the shared embedding, so always request it and
@@ -324,7 +425,10 @@ class EmotionClassifier(nn.Module):
             logits, projected, embeddings, modal_features = self._forward_multimodal(
                 audio_features, text_input_ids, text_attention_mask,
                 True, detach_modal_features=detach_modal_features)
-            logits = self._apply_salience_gate(logits, embeddings)
+            if self.use_salience_gate:
+                logits = self._apply_salience_gate(logits, embeddings)
+            if self.use_proto_dist_logits:
+                logits = self._apply_proto_dist(logits, embeddings)
             if return_embeddings:
                 return logits, projected, embeddings, modal_features
             return logits
@@ -384,6 +488,59 @@ class EmotionClassifier(nn.Module):
         adjust[:, 0] = self.salience_gate_w * intensity + self.salience_gate_b
         return logits + adjust
 
+    def set_proto_dist_reference(self, means, whiten):
+        """Install the class prototypes and whitening for the logit stream.
+
+        Both are fitted from the training split and held constant, so the
+        only learned freedom in the stream is the single mixing scalar.
+
+        Args:
+            means: [C, 3] class centres in normalised VAD space.
+            whiten: [C, 3, 3] Cholesky factors of the inverse covariances.
+        """
+        device = self.proto_dist_means.device
+        self.proto_dist_means.copy_(torch.as_tensor(
+            means, dtype=torch.float32, device=device))
+        self.proto_dist_whiten.copy_(torch.as_tensor(
+            whiten, dtype=torch.float32, device=device))
+
+    def _apply_proto_dist(self, logits, embeddings):
+        """Add a nearest-prototype term, in whitened VAD space, to the logits.
+
+        For each class the predicted VAD is displaced from that class's
+        centre and whitened by that class's covariance, so the norm is a
+        Mahalanobis distance. Negated, it is evidence for the class. A class
+        reweighting encodes this corpus's prior; a distance to a prototype
+        encodes geometry, which is what has a chance of transferring.
+
+        Args:
+            logits: [B, num_classes] classification logits.
+            embeddings: [B, hidden_dim] shared embedding.
+
+        Returns:
+            [B, num_classes] logits with the distance stream mixed in.
+        """
+        vad_pred = self.aux_vad_forward(embeddings)
+        if vad_pred is None or vad_pred.size(-1) != 3:
+            return logits
+        # [B, 1, 3] - [C, 3] -> [B, C, 3], then whiten per target class.
+        diff = vad_pred.unsqueeze(1) - self.proto_dist_means.unsqueeze(0)
+        whitened = torch.einsum('bcd,cde->bce', diff, self.proto_dist_whiten)
+        dist = torch.linalg.norm(whitened, dim=-1)          # [B, C]
+        return logits + self.effective_proto_alpha() * (-dist)
+
+    def effective_proto_alpha(self):
+        """Mixing weight actually applied to the prototype-distance stream.
+
+        Returns:
+            Scalar tensor. Equal to the raw parameter when no floor is set,
+            otherwise alpha_min + softplus(raw), which cannot fall below the
+            floor and stays differentiable everywhere.
+        """
+        if getattr(self, "proto_dist_alpha_min", 0.0) <= 0:
+            return self.proto_dist_alpha
+        return self.proto_dist_alpha_min + F.softplus(self.proto_dist_alpha)
+
     def aux_vad_forward(self, embeddings):
         """Auxiliary VAD head output from the shared embedding.
 
@@ -405,7 +562,7 @@ class EmotionClassifier(nn.Module):
 
         audio_features = self._pool_frames(audio_features)
         embeddings = self.embedding_layer(audio_features)  # [batch, 1024]
-        logits = self.output_layer(embeddings)  # [batch, output_dim]
+        logits = self.classify_from_embeddings(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
             projected = self._project(embeddings)
@@ -419,12 +576,84 @@ class EmotionClassifier(nn.Module):
 
         text_features = self.text_encoder(text_input_ids, text_attention_mask)  # [batch, 768]
         embeddings = self.embedding_layer(text_features)  # [batch, 1024]
-        logits = self.output_layer(embeddings)  # [batch, output_dim]
+        logits = self.classify_from_embeddings(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
             projected = self._project(embeddings)
             return logits, projected, embeddings, None
         return logits
+
+    def modality_features(self, audio_features: torch.Tensor,
+                          text_input_ids: torch.Tensor,
+                          text_attention_mask: torch.Tensor):
+        """Pooled per-modality features, before fusion.
+
+        Exposed so augmentation can act on one modality alone. Mixing the
+        post-fusion embedding attenuates the lexical evidence along with the
+        prosodic evidence, which is wrong for an intensity transform: the same
+        angry words spoken flatly are still angry.
+
+        Args:
+            audio_features: [B, T, D] frames or [B, D] pooled audio.
+            text_input_ids: [B, L] token ids.
+            text_attention_mask: [B, L] attention mask.
+
+        Returns:
+            (audio, text) tensors ready for the fusion module.
+        """
+        audio = self._pool_frames(audio_features)
+        text = self.text_encoder(text_input_ids, text_attention_mask)
+        return audio, text
+
+    def classify_from_modalities(self, audio_features: torch.Tensor,
+                                 text_features: torch.Tensor) -> torch.Tensor:
+        """Fuse per-modality features and classify.
+
+        The counterpart to modality_features: takes possibly-augmented audio
+        and text and runs the rest of the network unchanged.
+
+        Args:
+            audio_features: [B, D_a] pooled audio features.
+            text_features: [B, D_t] text features.
+
+        Returns:
+            [B, output_dim] class logits.
+        """
+        fused = self.fusion_module(audio_features, text_features)
+        return self.classify_from_embeddings(self.embedding_layer(fused))
+
+    def classify_from_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Map pooled embeddings to class logits.
+
+        Routes through the detector branch when feature-level fusion is on, so
+        every caller that turns an embedding into logits picks up the fusion
+        without knowing about it. Muted mixup relies on this: it is handed this
+        method rather than output_layer, which alone would receive the wrong
+        input width.
+
+        Args:
+            embeddings: [B, hidden_dim] pooled embeddings.
+
+        Returns:
+            [B, output_dim] class logits.
+        """
+        if not self.use_detector_fusion:
+            return self.output_layer(embeddings)
+        detector_repr = self.detector_branch(embeddings)
+        return self.output_layer(torch.cat([embeddings, detector_repr], dim=-1))
+
+    def detector_logits_from_embeddings(self, embeddings: torch.Tensor):
+        """Binary neutral-vs-emotional logits from the presence branch.
+
+        Args:
+            embeddings: [B, hidden_dim] pooled embeddings.
+
+        Returns:
+            [B, 2] presence logits, or None when fusion is disabled.
+        """
+        if not self.use_detector_fusion:
+            return None
+        return self.detector_head(self.detector_branch(embeddings))
 
     def _pool_frames(self, audio_features):
         """Collapse [B, T, D] frame input to [B, D'] before fusion.
@@ -456,7 +685,7 @@ class EmotionClassifier(nn.Module):
         text_features = self.text_encoder(text_input_ids, text_attention_mask)  # [batch, 768]
         fused_features = self.fusion_module(audio_features, text_features)  # [batch, fusion_hidden_dim]
         embeddings = self.embedding_layer(fused_features)  # [batch, 1024]
-        logits = self.output_layer(embeddings)  # [batch, output_dim]
+        logits = self.classify_from_embeddings(embeddings)  # [batch, output_dim]
 
         if return_embeddings:
             projected = self._project(embeddings)
@@ -532,11 +761,17 @@ def create_model(config):
         use_hierarchical_head=cfg.get('use_hierarchical_head', False),
         use_latent_prototypes=cfg.get('use_latent_prototypes', False),
         prototypes_per_class=cfg.get('prototypes_per_class', 2),
+        use_proto_dist_logits=cfg.get('use_proto_dist_logits', False),
+        proto_dist_alpha_min=cfg.get('proto_dist_alpha_min', 0.0),
         use_aux_vad_cluster=cfg.get('use_aux_vad_cluster', False),
         use_salience_gate=cfg.get('use_salience_gate', False),
         aux_vad_cluster_k=cfg.get('aux_vad_cluster_k', 8),
         aux_vad_head_depth=cfg.get('aux_vad_head_depth', 1),
+        aux_vad_subtype_dim=cfg.get('aux_vad_subtype_dim', 16),
+        aux_resid_cluster_k=cfg.get('aux_resid_cluster_k', 6),
         aux_vad_task=cfg.get('aux_vad_task', 'cluster'),
         aux_vad_cluster_scope=cfg.get('aux_vad_cluster_scope', 'global'),
         aux_vad_clusters_per_class=cfg.get('aux_vad_clusters_per_class', 2),
+        use_detector_fusion=cfg.get('use_detector_fusion', False),
+        detector_fusion_dim=cfg.get('detector_fusion_dim', 128),
     )

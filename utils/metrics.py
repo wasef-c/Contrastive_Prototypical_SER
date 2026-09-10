@@ -170,3 +170,68 @@ def calculate_vad_metrics(predictions, targets):
     metrics['overall_ccc'] = np.mean([metrics[f'{name}_ccc'] for name in vad_names])
 
     return metrics
+
+
+def threshold_free_metrics(logits, labels, num_classes=4):
+    """Split performance into the neutral boundary and emotion discrimination.
+
+    UAR mixes two things that behave differently under domain shift: where the
+    neutral decision boundary sits, and how well the emotions are separated
+    from each other. Both are threshold-dependent, so a mechanism that only
+    moves the operating point can look like a real gain.
+
+    These two are invariant to the threshold:
+
+        neutral_auc  neutral-vs-rest ROC-AUC. Measures how well the model
+                     RANKS emotional above neutral, independent of where the
+                     boundary is drawn. Unchanged by a pure bias shift.
+        emo_auc      macro one-vs-rest AUC over the emotional classes,
+                     computed on emotional samples only, so the neutral
+                     column cannot influence it.
+
+    Measured on the frozen prototypicality arm, neutral_auc moved +0.0001
+    against its control while emo_auc moved +0.0032 on all four corpora, which
+    is what identified the gain as emotion ranking rather than a boundary
+    shift.
+
+    Args:
+        logits: [N, C] raw model outputs.
+        labels: [N] true class ids, 0 is neutral.
+        num_classes: size of the label set.
+
+    Returns:
+        Dict with neutral_auc and emo_auc. Either is NaN when a class is
+        missing from the split.
+    """
+    import numpy as np
+    from sklearn.metrics import roc_auc_score
+
+    logits = np.asarray(logits, dtype=np.float64)
+    labels = np.asarray(labels)
+    out = {"neutral_auc": float("nan"), "emo_auc": float("nan")}
+    if logits.ndim != 2 or logits.shape[1] < 2:
+        return out
+
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    probs = np.exp(shifted)
+    probs /= probs.sum(axis=1, keepdims=True)
+
+    is_emo = (labels != 0).astype(int)
+    if 0 < is_emo.sum() < len(is_emo):
+        # Score is "how emotional", so a bias on the neutral logit shifts every
+        # score equally and leaves the ranking, hence the AUC, untouched.
+        out["neutral_auc"] = float(roc_auc_score(is_emo, 1.0 - probs[:, 0]))
+
+    mask = labels != 0
+    if mask.sum() > 1 and logits.shape[1] >= num_classes:
+        emo_labels = labels[mask] - 1
+        if len(np.unique(emo_labels)) > 1:
+            emo_probs = probs[mask][:, 1:num_classes]
+            emo_probs = emo_probs / np.clip(
+                emo_probs.sum(axis=1, keepdims=True), 1e-12, None)
+            try:
+                out["emo_auc"] = float(roc_auc_score(
+                    emo_labels, emo_probs, multi_class="ovr", average="macro"))
+            except ValueError:
+                pass
+    return out

@@ -22,7 +22,8 @@ import argparse
 import json
 import os
 
-from utils.config import Config
+from utils.annotator_meta import SUBTYPE_NAMES
+from utils.config import Config, RAW_AUDIO_ENCODERS
 from data.dataset import create_datasets
 from data.collate import vad_collate_fn
 from models.classifier import create_model
@@ -33,16 +34,30 @@ from models.domain_adversarial import (
     PrototypicalDomainAdversarialLoss,
 )
 from models.prototypicality_predictor import PrototypicalityPredictor
+from utils.length_bucket import (LengthBucketedBatchSampler,
+                                 load_or_compute_durations)
+from utils.margin_loss import LDAMLoss
+from utils.metrics import threshold_free_metrics
 from utils.metrics import calculate_classification_metrics, calculate_vad_metrics
 from utils.prototypicality import (
+    pooled_whitening,
     DATASETS_WITH_VAD,
     LearnableCentroids,
     batch_calculate_difficulty,
+    class_vad_stats,
+    mahalanobis_distance,
+    all_class_residuals,
+    residual_targets,
+    signed_axis_targets,
+    whitening_matrices,
     batch_difficulty_tensor,
     calculate_difficulty,
 )
 from utils.multiview_prototypicality import compute_multiview_difficulty, compute_crossmodal_agreement
-from utils.muted_mixup import (muted_mixup_loss, muted_mixup_step,
+from utils.muted_mixup import (consistent_muted_mixup,
+                               muted_mixup_loss, muted_mixup_step,
+                               sparse_fill_mixup_step,
+                               vad_gated_symmetric_mixup,
                                symmetric_mixup_step)
 from utils.salience import (
     compute_salience_stats,
@@ -96,9 +111,11 @@ from utils.nrc_lexicon import (
 from utils.aux_vad import (
     batch_cluster_ids_and_mask,
     batch_per_class_cluster_ids_and_mask,
+    batch_residual_cluster_ids_and_mask,
     batch_scrambled_ids_and_mask,
     batch_vad_targets_and_mask,
     build_per_class_vad_centroids,
+    build_residual_centroids,
     build_vad_centroids,
 )
 from utils.aux_vad_viz import save_cluster_visualization
@@ -152,7 +169,7 @@ def _prepare_model_inputs(batch, config, model, device):
     # layers is 0, so at that point the batch has 'features' and no
     # 'waveforms' regardless of the configured encoder_type.
     has_features = 'features' in batch
-    uses_raw_audio = audio_encoder_type in ("wav2vec2", "emotion2vec") and not has_features
+    uses_raw_audio = audio_encoder_type in RAW_AUDIO_ENCODERS and not has_features
 
     if config.modality == "audio":
         if uses_raw_audio:
@@ -232,6 +249,10 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         proto_predictor.train()
 
     muted_synth_count = 0
+    # Mean blend coefficient, reported so a miscalibrated VAD rule is visible
+    # in the log rather than only in the final metrics.
+    muted_lam_sum = 0.0
+    muted_lam_n = 0
     total_loss = 0
     total_primary_loss = 0
     total_contrastive_loss = 0
@@ -255,7 +276,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     all_vad_preds = []
     all_vad_targets = []
 
-    # Contrastive weight warm-up: linear ramp from 0 → target over warmup epochs
+    # Contrastive weight warm-up: linear ramp from 0 to target over warmup epochs
     warmup_epochs = getattr(config, 'contrastive_warmup_epochs', 5)
     if warmup_epochs > 0 and current_epoch < warmup_epochs:
         warmup_factor = current_epoch / warmup_epochs
@@ -287,6 +308,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                           or getattr(config, 'use_vadmix', False)
                           or getattr(config, 'use_aux_vad_cluster', False)
                           or getattr(config, 'use_muted_mixup', False)
+                          or getattr(config, 'use_detector_fusion', False)
                           or _ce_needs_modal)
         raw_embeddings = None
         embeddings_norm = None
@@ -545,6 +567,18 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     # amplifying minority-class gradients the way reweighting
                     # does. See Menon et al., ICLR 2021.
                     adj_logits = logits if logit_adjust is None else logits + logit_adjust
+                    # A class-dependent margin has to be applied to the logits
+                    # the loss actually sees. This branch calls F.cross_entropy
+                    # directly and only borrows criterion.weight, so a margin
+                    # living inside the criterion object would be constructed,
+                    # printed, and silently ignored.
+                    ldam_margins = getattr(criterion, 'margins', None)
+                    if ldam_margins is not None:
+                        adj_logits = adj_logits - (
+                            F.one_hot(labels.long(), adj_logits.size(1)).float()
+                            * ldam_margins.to(adj_logits.device))
+                        adj_logits = adj_logits * float(
+                            getattr(criterion, 'scale', 1.0))
                     if amb_w is None:
                         loss_primary = F.cross_entropy(
                             adj_logits, labels, weight=cls_weights, reduction='sum'
@@ -773,9 +807,386 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             # Auxiliary prototypicality prediction loss
             loss_proto_pred = torch.tensor(0.0, device=device)
             if proto_predictor is not None and raw_embeddings is not None:
-                difficulties = batch_calculate_difficulty(batch, config.expected_vad).to(device)
+                target_kind = str(getattr(config, 'proto_target', 'scalar'))
+                if target_kind == 'scalar' and getattr(
+                        config, '_proto_means', None) is None:
+                    difficulties = batch_calculate_difficulty(
+                        batch, config.expected_vad).to(device)
+                else:
+                    vad_np = batch['vad'].numpy().astype(np.float64)
+                    _pdims = getattr(config, '_proto_dims', (0, 1, 2))
+                    if len(_pdims) != vad_np.shape[1]:
+                        vad_np = vad_np[:, list(_pdims)]
+                    lab_np = batch['label'].numpy()
+                    means = config._proto_means
+                    if target_kind == 'allclass':
+                        difficulties = torch.tensor(
+                            all_class_residuals(vad_np, lab_np, means,
+                                                whiten=config._proto_whiten),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'signed':
+                        difficulties = torch.tensor(
+                            signed_axis_targets(vad_np, lab_np, means),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'protoscore':
+                        # Bounded prototypicality: 1 at the class centre,
+                        # decaying towards 0 as the sample becomes atypical.
+                        # Unlike 'invresidual' this is NOT affine, so it
+                        # changes the geometry of the loss rather than only
+                        # relabelling it. Whitened distances have a long right
+                        # tail, so MSE on the raw distance is dominated by the
+                        # most atypical samples; exp(-d) compresses that tail
+                        # and spends the head's resolution on samples near the
+                        # centre, which is where the neutral against emotional
+                        # boundary sits. Must precede the generic mahalanobis
+                        # branch below, which would otherwise capture it.
+                        difficulties = torch.tensor(
+                            np.exp(-mahalanobis_distance(
+                                vad_np, lab_np, means,
+                                config._proto_inv_covs)),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'offlabel':
+                        # The secondary-label target: where annotators who did
+                        # NOT vote the majority class went instead.
+                        #
+                        # Take the annotator vote distribution over the four
+                        # classes, zero the sample's own class, renormalise.
+                        # For a sad utterance this asks "given it is sad,
+                        # which way do raters drift", and the neutral
+                        # component of that answer is the neutral boundary
+                        # supervised directly rather than inferred through VAD
+                        # geometry.
+                        #
+                        # Distinct from soft-label training (Ando et al. 2018)
+                        # and from label smoothing: removing the true-class
+                        # mass means the target carries no information about
+                        # the label itself, only about the direction of
+                        # disagreement. That has to be said explicitly in the
+                        # paper or a reader will call it label smoothing.
+                        #
+                        # label_dist is 9 wide (Neutral, Happy, Sad, Angry,
+                        # Contempt, Surprise, Disgust, Fear, Other); the first
+                        # four are this project's classes in the same order.
+                        # Rows with no annotator metadata, and rows where the
+                        # off-label mass is zero because every annotator
+                        # agreed, fall back to a uniform target over the other
+                        # three classes.
+                        _ncls = int(getattr(config, 'num_classes', 4))
+                        _ld = batch['label_dist'].numpy().astype(
+                            np.float64)[:, :_ncls]
+                        _ld[np.arange(len(lab_np)), lab_np] = 0.0
+                        _tot = _ld.sum(axis=1, keepdims=True)
+                        _uniform = np.full_like(_ld, 1.0 / max(1, _ncls - 1))
+                        _uniform[np.arange(len(lab_np)), lab_np] = 0.0
+                        _have = (batch['annot_mask'].numpy() > 0)[:, None] & (_tot > 0)
+                        _ld = np.where(_have, _ld / np.maximum(_tot, 1e-8), _uniform)
+                        difficulties = torch.tensor(
+                            _ld, dtype=torch.float32, device=device)
+                    elif target_kind == 'dispersion':
+                        # Inter-rater standard deviation as the auxiliary
+                        # target, three dimensions, one per VAD axis. This is
+                        # the Eyben et al. 2012 signal: they add annotator
+                        # standard deviation as an extra multi-task target
+                        # alongside five affective dimensions. Isolating it
+                        # here gives a direct comparison in our setup.
+                        #
+                        # Note resdisp already tested dispersion CONCATENATED
+                        # with the residual and lost 1.83 UAR against the
+                        # control, but that confounds two things: dispersion
+                        # being unhelpful, and dispersion diluting a target
+                        # that works. This arm separates them.
+                        #
+                        # Rows the annotator join did not cover carry a std of
+                        # zero, which reads as perfect agreement rather than
+                        # as missing, so they take the batch mean instead.
+                        _sd = batch['annot_vad_std'].numpy().astype(np.float64)
+                        if len(_pdims) != _sd.shape[1]:
+                            _sd = _sd[:, list(_pdims)]
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _sd[~_have] = _sd[_have].mean(axis=0)
+                        difficulties = torch.tensor(
+                            _sd, dtype=torch.float32, device=device)
+                    elif target_kind == 'agreement':
+                        # Annotator agreement AS the auxiliary target: the
+                        # fraction of annotators choosing the majority label.
+                        #
+                        # This is the closest prior art's quantity. Kim and
+                        # Provost 2015 define "prototypicality" as annotator
+                        # agreement and use it to weight training on IEMOCAP
+                        # four-class, with the gain concentrated on neutral.
+                        # Running it here as an auxiliary target makes the
+                        # distinction empirical rather than rhetorical.
+                        #
+                        # Two reasons to expect it to do less than the
+                        # residual. It is a scalar, and every scalar target
+                        # tried here has been null (protoscore, exp of minus
+                        # the Mahalanobis distance, discards direction and
+                        # does nothing), while the direction-preserving
+                        # three-vector works. And it measures something nearly
+                        # orthogonal to our target: across 80,941 training
+                        # rows the correlation between class agreement and
+                        # Mahalanobis atypicality is +0.027, with per-axis
+                        # signed correlations no larger than 0.086.
+                        #
+                        # Rows the annotator join did not cover carry a
+                        # consensus of zero, which would read as total
+                        # disagreement rather than as missing. They take the
+                        # batch mean of the covered rows instead.
+                        _ag = batch['annot_consensus'].numpy().astype(np.float64)
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _ag[~_have] = _ag[_have].mean()
+                        elif not _have.any():
+                            _ag = np.full_like(_ag, 0.5)
+                        difficulties = torch.tensor(
+                            _ag[:, None], dtype=torch.float32, device=device)
+                    elif target_kind == 'presidual':
+                        # Precision-weighted residual: the whitened residual
+                        # divided per axis by one plus the annotator
+                        # dispersion on that axis.
+                        #
+                        #     r = W_c (v - mu_c) / (1 + s)
+                        #
+                        # Section 4 of the results log measures roughly 29
+                        # percent of within-class VAD spread as annotator
+                        # measurement noise. The plain residual cannot tell a
+                        # speaker who is genuinely atypical from raters who
+                        # could not agree, and treats both as large targets.
+                        # Dividing by dispersion shrinks the second case, so
+                        # the magnitude comes to mean RELIABLY atypical.
+                        #
+                        # This modulates the working target instead of
+                        # widening it. The 'resdisp' arm appended dispersion
+                        # as three extra outputs and lost 1.83 UAR against the
+                        # placebo on IEMOCAP, for two compounding reasons:
+                        # dispersion appears not to be recoverable from audio
+                        # and text, so half the gradient fitted noise, and a
+                        # standard deviation is a magnitude with no direction,
+                        # the same defect that made the scalar 'protoscore'
+                        # null. Here dispersion never has to be predicted and
+                        # the target keeps all three signed components.
+                        #
+                        # Rows the annotator join did not cover carry a std of
+                        # zero, which would read as perfect agreement and
+                        # leave those residuals undivided. They take the batch
+                        # mean of the covered rows instead.
+                        _r = residual_targets(vad_np, lab_np, means,
+                                              whiten=config._proto_whiten)
+                        _sd = batch['annot_vad_std'].numpy().astype(np.float64)
+                        if len(_pdims) != _sd.shape[1]:
+                            _sd = _sd[:, list(_pdims)]
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _sd[~_have] = _sd[_have].mean(axis=0)
+                        elif not _have.any():
+                            _sd = np.zeros_like(_sd)
+                        difficulties = torch.tensor(
+                            _r / (1.0 + np.maximum(_sd, 0.0)),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'resdisp':
+                        # Whitened residual concatenated with the annotator
+                        # dispersion for the same utterance, in the same
+                        # class-whitened coordinates. Six outputs.
+                        #
+                        # Every other target here is a deterministic function
+                        # of (VAD, label), so none can carry more information
+                        # than (VAD, label) already does; the whitened
+                        # residual works by presenting that information in a
+                        # class-comparable form, not by adding to it, which is
+                        # why the dose response is flat across 8x and why an
+                        # affine reparameterisation reproduces it exactly.
+                        # Annotator dispersion is the first component that is
+                        # NOT recoverable from the consensus VAD or the label:
+                        # two utterances with identical consensus ratings can
+                        # have had very different levels of rater agreement.
+                        #
+                        # It is whitened by the same per-class matrix so the
+                        # two halves share units and the class-conditional
+                        # structure that the ladder shows is load-bearing.
+                        # Rows the annotator join did not cover carry a std of
+                        # zero, which would read as perfect agreement, so they
+                        # are set to the batch mean of the covered rows;
+                        # absent evidence reads as typical rather than as
+                        # certainty.
+                        _r = residual_targets(vad_np, lab_np, means,
+                                              whiten=config._proto_whiten)
+                        _sd = batch['annot_vad_std'].numpy().astype(np.float64)
+                        if len(_pdims) != _sd.shape[1]:
+                            _sd = _sd[:, list(_pdims)]
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _sd[~_have] = _sd[_have].mean(axis=0)
+                        _w = getattr(config, '_proto_whiten', None)
+                        if _w is not None:
+                            _sd = np.einsum('nij,nj->ni', _w[lab_np], _sd)
+                        difficulties = torch.tensor(
+                            np.concatenate([_r, _sd], axis=1),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'rawvad':
+                        # Raw VAD, with no centroid subtraction and no
+                        # whitening. The direct test of whether
+                        # 'prototypicality' does any work: residual is an
+                        # affine function of VAD given the class, and the
+                        # class is what the main head already computes, so a
+                        # reviewer will ask whether predicting VAD itself is
+                        # equivalent. Same head, same output width, same
+                        # loss weight; only the target differs.
+                        difficulties = torch.tensor(
+                            vad_np, dtype=torch.float32, device=device)
+                    elif target_kind in ('residual', 'absresidual',
+                                         'invresidual'):
+                        _r = residual_targets(vad_np, lab_np, means,
+                                              whiten=config._proto_whiten)
+                        if target_kind == 'invresidual':
+                            # 1 - residual. Affine, and therefore an exact
+                            # reparameterisation of 'residual': the head ends
+                            # in a bare Linear, so its final layer can absorb
+                            # the negation and the shift, and MSE is
+                            # symmetric. The optimum and the gradient reaching
+                            # the shared trunk are unchanged. This arm exists
+                            # to audit the invertibility argument that retired
+                            # the consensus centroids; a difference beyond
+                            # seed noise would falsify that argument.
+                            _r = 1.0 - _r
+                        if target_kind == 'absresidual':
+                            # Magnitude without direction. The signed residual
+                            # plus the label reconstructs VAD at R^2 0.983, so
+                            # it is VAD regression in a class-shifted frame;
+                            # the absolute value drops that to 0.406, making it
+                            # the first variant that is not recoverable from
+                            # VAD. The cost is the sign, which carries whether
+                            # a sample is more extreme than its class or
+                            # drifting toward neutral.
+                            _r = np.abs(_r)
+                        difficulties = torch.tensor(
+                            _r, dtype=torch.float32, device=device)
+                    elif target_kind == 'subtype':
+                        # Nearest per-class subtype centroid, as a class id in
+                        # [0, num_classes * clusters_per_class).
+                        cents = config._proto_subtype_centroids
+                        kpc = cents.shape[1]
+                        d = np.linalg.norm(
+                            vad_np[:, None, :] - cents[lab_np], axis=2)
+                        difficulties = torch.tensor(
+                            lab_np * kpc + d.argmin(axis=1),
+                            dtype=torch.long, device=device)
+                    elif str(getattr(config, 'proto_metric',
+                                     'euclidean')) == 'mahalanobis':
+                        difficulties = torch.tensor(
+                            mahalanobis_distance(vad_np, lab_np, means,
+                                                 config._proto_inv_covs),
+                            dtype=torch.float32, device=device)
+                    else:
+                        difficulties = torch.tensor(
+                            np.linalg.norm(vad_np - means[lab_np], axis=1),
+                            dtype=torch.float32, device=device)
+                if bool(getattr(config, 'proto_predictor_shuffle', False)):
+                    # Control task: same head, same parameters, same gradient
+                    # path, but the target no longer belongs to the sample.
+                    # Anything the real arm gains over this is attributable to
+                    # prototypicality rather than to the extra capacity.
+                    #
+                    # "batch" permutes within the batch, the original design.
+                    # "pool" draws from the training set's residuals, removing
+                    # both the fixed points a permutation always has and any
+                    # dependence on batch composition.
+                    # "gauss" draws from a Gaussian matched to the pool's mean
+                    # and covariance, so the control does not reuse any real
+                    # row at all. Agreement across the three says the result
+                    # does not depend on how the control was built.
+                    _mode = str(getattr(config, 'proto_shuffle_mode', 'batch'))
+                    _pool_t = getattr(config, '_proto_pool', None)
+                    if _mode == 'batch' or _pool_t is None:
+                        difficulties = difficulties[torch.randperm(
+                            difficulties.size(0), device=difficulties.device)]
+                    elif _mode == 'pool':
+                        pick = torch.randint(_pool_t.size(0),
+                                             (difficulties.size(0),))
+                        difficulties = _pool_t[pick].to(difficulties.device)
+                    elif _mode == 'gauss':
+                        if not hasattr(config, '_proto_pool_chol'):
+                            _mu = _pool_t.mean(dim=0)
+                            _cov = torch.from_numpy(np.cov(
+                                _pool_t.numpy().T)).float()
+                            _cov += 1e-6 * torch.eye(_cov.size(0))
+                            config._proto_pool_mu = _mu
+                            config._proto_pool_chol = torch.linalg.cholesky(_cov)
+                        z = torch.randn(difficulties.size(0),
+                                        config._proto_pool_mu.size(0))
+                        difficulties = (config._proto_pool_mu
+                                        + z @ config._proto_pool_chol.T
+                                        ).to(difficulties.device)
+                    else:
+                        raise ValueError(
+                            f"unknown proto_shuffle_mode: {_mode}. Use batch, "
+                            f"pool or gauss.")
                 pred_proto = proto_predictor(raw_embeddings)
-                loss_proto_pred = F.mse_loss(pred_proto, difficulties)
+                # Optional per-sample weighting by annotator agreement. A
+                # contested utterance's consensus VAD summarises a
+                # disagreement rather than measuring the emotion, so its
+                # residual is a noisy target the head is asked to fit anyway.
+                # Annotator dispersion is one of the few quantities available
+                # that is not a deterministic function of VAD, so unlike the
+                # geometric variants this can add information rather than
+                # restate it. Rows the annotator join did not cover carry a
+                # std of zero, which the floor would turn into the LARGEST
+                # weight; they are held at the mean of the covered rows so
+                # absent evidence reads as neutral rather than as certainty.
+                agree_w = None
+                if (bool(getattr(config, 'proto_agreement_weight', False))
+                        and 'annot_vad_std' in batch):
+                    spread = torch.clamp(
+                        batch['annot_vad_std'].to(device), min=0.25).mean(dim=1)
+                    agree_w = 1.0 / (1.0 + spread)
+                    has_meta = batch['annot_mask'].to(device) > 0
+                    if has_meta.any():
+                        agree_w = torch.where(has_meta, agree_w,
+                                              agree_w[has_meta].mean())
+                    agree_w = agree_w / agree_w.mean().clamp_min(1e-6)
+                if str(getattr(config, 'proto_target', 'scalar')) == 'subtype':
+                    if agree_w is None:
+                        loss_proto_pred = F.cross_entropy(pred_proto, difficulties)
+                    else:
+                        per = F.cross_entropy(pred_proto, difficulties,
+                                              reduction='none')
+                        loss_proto_pred = (per * agree_w).mean()
+                elif agree_w is None:
+                    loss_proto_pred = F.mse_loss(pred_proto, difficulties)
+                else:
+                    per = F.mse_loss(pred_proto, difficulties,
+                                     reduction='none').mean(dim=1)
+                    loss_proto_pred = (per * agree_w).mean()
+
+                # Gradient-alignment diagnostic, sampled every N steps.
+                # Reuses the loss already computed above rather than running a
+                # second forward: the predictor contains dropout, so an extra
+                # forward would advance the RNG and make arms differ for a
+                # reason unrelated to the mechanism. autograd.grad returns
+                # gradients without writing .grad, so the real backward that
+                # follows is unaffected.
+                cos_every = int(getattr(config, 'proto_grad_cosine_every', 0))
+                if cos_every > 0 and (global_step % cos_every == 0):
+                    try:
+                        shared = [q for q in model.fusion_module.parameters()
+                                  if q.requires_grad]
+                        if shared:
+                            g_main = torch.autograd.grad(
+                                loss_primary, shared, retain_graph=True,
+                                allow_unused=True)
+                            g_aux = torch.autograd.grad(
+                                loss_proto_pred, shared, retain_graph=True,
+                                allow_unused=True)
+                            fm = torch.cat([g.reshape(-1) for g in g_main
+                                            if g is not None])
+                            fa = torch.cat([g.reshape(-1) for g in g_aux
+                                            if g is not None])
+                            wandb.log({
+                                'aux/grad_cosine': float(F.cosine_similarity(
+                                    fm.unsqueeze(0), fa.unsqueeze(0)).item()),
+                                'aux/global_step': global_step})
+                    except Exception:
+                        pass
 
             # Cross-modal alignment loss: train learned projections
             loss_cross_modal = torch.tensor(0.0, device=device)
@@ -817,22 +1228,148 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     # Blend both ways so equal numbers of synthetic samples
                     # land on each side of the neutral boundary and the
                     # prior is left where it was.
+                    mm_lam = None
                     mm_logits, mm_targets = symmetric_mixup_step(
-                        raw_embeddings, labels, model.output_layer,
+                        raw_embeddings, labels, model.classify_from_embeddings,
                         alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
                         within_class_control=bool(
                             getattr(config, 'muted_mixup_control', False)),
                     )
                 else:
-                    mm_logits, mm_targets, _mm_lam = muted_mixup_step(
-                        raw_embeddings, labels, model.output_layer,
-                        alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
-                        shuffle_control=bool(getattr(config, 'muted_mixup_control', False)),
-                    )
+                    # VAD-calibrated variant needs the batch's VAD and the
+                    # neutral centre; expected_vad[0] is that centre already.
+                    mm_vad = None
+                    mm_centre = None
+                    span = None
+                    if bool(getattr(config, 'muted_mixup_vad_calibrated', False)):
+                        exp_vad = getattr(config, 'expected_vad', None) or {}
+                        centre = exp_vad.get(0) or exp_vad.get('0')
+                        if centre is not None and 'vad' in batch:
+                            span = getattr(config, '_muted_vad_span', None)
+                            mm_vad = batch['vad'].to(device).float()
+                            mm_centre = torch.tensor(
+                                centre, dtype=torch.float32, device=device)
+                    if (bool(getattr(config, 'muted_mixup_gated_symmetric', False))
+                            and mm_vad is not None
+                            and 'audio_features' in model_inputs
+                            and 'text_input_ids' in model_inputs):
+                        # Mix before fusion so a modality can be left intact.
+                        # Intensity is prosodic, so attenuating the fused
+                        # embedding also erases lexical evidence, which is not
+                        # what the hypothesis claims.
+                        a_feat, t_feat = model.modality_features(
+                            model_inputs['audio_features'],
+                            model_inputs['text_input_ids'],
+                            model_inputs['text_attention_mask'])
+                        mix_a, mix_t, mm_targets, mm_lam = vad_gated_symmetric_mixup(
+                            a_feat, t_feat, labels, mm_vad, mm_centre,
+                            mix_audio=bool(getattr(config, 'muted_mixup_mix_audio', True)),
+                            mix_text=bool(getattr(config, 'muted_mixup_mix_text', True)),
+                            gate_quantile=float(
+                                getattr(config, 'muted_mixup_gate_quantile', 0.5)),
+                            shuffle_control=bool(
+                                getattr(config, 'muted_mixup_vad_shuffle', False)),
+                        )
+                        mm_logits = (model.classify_from_modalities(mix_a, mix_t)
+                                     if mix_a is not None else None)
+                    elif (bool(getattr(config, 'muted_mixup_sparse_fill', False))
+                            and mm_vad is not None
+                            and getattr(config, '_sparse_direction', None) is not None):
+                        # Each class moves toward the intensity end its own
+                        # training data is thin at, rather than every class
+                        # muting toward neutral.
+                        mm_logits, mm_targets, mm_lam = sparse_fill_mixup_step(
+                            raw_embeddings, labels,
+                            model.classify_from_embeddings,
+                            vad=mm_vad,
+                            neutral_centre=mm_centre,
+                            class_direction=torch.tensor(
+                                config._sparse_direction, device=device),
+                            class_target=torch.tensor(
+                                config._sparse_target, dtype=torch.float32,
+                                device=device),
+                            shuffle_control=bool(
+                                getattr(config, 'muted_mixup_vad_shuffle', False)),
+                        )
+                    else:
+                        mm_logits, mm_targets, mm_lam = muted_mixup_step(
+                            raw_embeddings, labels,
+                            model.classify_from_embeddings,
+                            alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                            shuffle_control=bool(
+                                getattr(config, 'muted_mixup_control', False)),
+                            vad=mm_vad,
+                            neutral_centre=mm_centre,
+                            vad_target_quantile=float(
+                                getattr(config, 'muted_mixup_vad_quantile', 0.5)),
+                            vad_shuffle=bool(
+                                getattr(config, 'muted_mixup_vad_shuffle', False)),
+                            vad_target_span=span if mm_vad is not None else None,
+                        )
+                    if mm_lam is not None:
+                        muted_lam_sum += float(mm_lam.sum())
+                        muted_lam_n += int(mm_lam.numel())
                 if mm_logits is not None:
                     cls_w_mm = criterion.weight if hasattr(criterion, 'weight') else None
                     loss_muted = muted_mixup_loss(mm_logits, mm_targets, cls_w_mm)
                     muted_synth_count += int(mm_logits.size(0))
+
+            # Consistency-coupled mixup. The classification target for a
+            # blended sample stays the hard original label, while its
+            # prototypicality target moves with the blend, so the two
+            # supervisions state the same claim instead of contradicting each
+            # other: the category is invariant under attenuation, the position
+            # within the category is not.
+            loss_consistent = torch.tensor(0.0, device=device)
+            if (bool(getattr(config, 'use_consistent_mixup', False))
+                    and raw_embeddings is not None
+                    and proto_predictor is not None
+                    and config.task_type == "classification"
+                    and 'vad' in batch):
+                cm_vad = batch['vad'].to(device).float()
+                cm_logits, cm_labels, cm_mixed_vad, _cm_lam, cm_emb = (
+                    consistent_muted_mixup(
+                        raw_embeddings, labels, cm_vad,
+                        model.classify_from_embeddings,
+                        gate_quantile=float(
+                            getattr(config, 'muted_mixup_gate_quantile', 0.5)),
+                        shuffle_control=bool(
+                            getattr(config, 'muted_mixup_vad_shuffle', False)),
+                    ))
+                if cm_logits is not None:
+                    cls_w_cm = (criterion.weight
+                                if hasattr(criterion, 'weight') else None)
+                    loss_consistent = muted_mixup_loss(cm_logits, cm_labels,
+                                                       cls_w_cm)
+                    # Auxiliary supervision on the synthetic points, using
+                    # where the blend actually landed in VAD space.
+                    means = getattr(config, '_proto_means', None)
+                    if means is not None:
+                        tgt = torch.tensor(
+                            residual_targets(
+                                cm_mixed_vad.detach().cpu().numpy().astype(
+                                    np.float64),
+                                cm_labels.cpu().numpy(), means,
+                                whiten=config._proto_whiten),
+                            dtype=torch.float32, device=device)
+                        loss_consistent = loss_consistent + F.mse_loss(
+                            proto_predictor(cm_emb), tgt)
+                    muted_synth_count += int(cm_logits.size(0))
+
+            # Presence loss for feature-level detector fusion. The branch is
+            # already inside the classification path, so this only supervises
+            # what it encodes. The placebo shuffles the targets, leaving the
+            # branch as capacity that carries no presence information.
+            loss_det_fusion = torch.tensor(0.0, device=device)
+            if (getattr(config, 'use_detector_fusion', False)
+                    and raw_embeddings is not None
+                    and config.task_type == "classification"):
+                det_logits = model.detector_logits_from_embeddings(raw_embeddings)
+                det_targets = (labels != 0).long()
+                if getattr(config, 'detector_fusion_shuffle', False):
+                    perm = torch.randperm(det_targets.size(0), device=det_targets.device)
+                    det_targets = det_targets[perm]
+                loss_det_fusion = F.cross_entropy(det_logits, det_targets)
 
             # Auxiliary VAD-cluster loss. Aux head lives on the model; we
             # already have raw_embeddings (use_embeddings was forced True when
@@ -842,7 +1379,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             use_aux_vad_flag = (getattr(config, 'use_aux_vad_cluster', False)
                                 and raw_embeddings is not None
                                 and getattr(model, 'use_aux_vad_cluster', False)
-                                and (aux_vad_task == 'regression'
+                                and (aux_vad_task in ('regression', 'subtype')
                                      or aux_vad_centroids is not None))
             if use_aux_vad_flag:
                 aux_out = model.aux_vad_forward(raw_embeddings)
@@ -862,11 +1399,77 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     per_sample_aux = F.mse_loss(
                         aux_out, vad_targets, reduction='none',
                     ).mean(dim=1)
+                elif aux_vad_task == 'resid_cluster':
+                    # Target is the sample's deviation mode: which way it
+                    # departs from its own class prototype, in whitened VAD
+                    # space. Under the shared scope the same mode id spans
+                    # classes, so "louder than this emotion normally is" is
+                    # one target whether the emotion is sadness or happiness.
+                    cluster_ids, aux_mask = batch_residual_cluster_ids_and_mask(
+                        batch,
+                        aux_vad_centroids,
+                        config._resid_means_t,
+                        config._resid_whiten_t,
+                        device,
+                        scope=getattr(config, 'aux_vad_cluster_scope', 'shared'),
+                    )
+                    if getattr(config, 'aux_vad_shuffle', False):
+                        # Placebo: permute the mode ids across the supervised
+                        # rows. Same head, same label marginal, same number of
+                        # supervised samples; only the correspondence between
+                        # utterance and deviation mode is broken.
+                        valid = aux_mask.nonzero(as_tuple=True)[0]
+                        if valid.numel() > 1:
+                            perm = valid[torch.randperm(valid.numel(),
+                                                        device=device)]
+                            shuffled = cluster_ids.clone()
+                            shuffled[valid] = cluster_ids[perm]
+                            cluster_ids = shuffled
+                    per_sample_aux = F.cross_entropy(
+                        aux_out, cluster_ids, reduction='none',
+                    )
+                elif aux_vad_task == 'subtype':
+                    # Annotator-supplied secondary tags. Where k-means invents
+                    # subtypes from VAD geometry, these are the nuance the
+                    # annotators actually named: Depressed against Frustrated
+                    # inside sad, Amused against Excited inside happy. Several
+                    # tags can apply at once, so the target is a per-tag rate
+                    # and the loss is multi-label BCE rather than a softmax.
+                    subtype_targets = batch['subtype_dist'].to(device)
+                    aux_mask = batch['annot_mask'].to(device)
+                    if getattr(config, 'aux_vad_shuffle', False):
+                        # Placebo, permuted within the covered rows only so the
+                        # control keeps the same number of supervised samples
+                        # as the real arm and differs solely in whether the
+                        # target belongs to the utterance.
+                        valid = aux_mask.nonzero(as_tuple=True)[0]
+                        if valid.numel() > 1:
+                            perm = valid[torch.randperm(valid.numel(),
+                                                        device=device)]
+                            shuffled = subtype_targets.clone()
+                            shuffled[valid] = subtype_targets[perm]
+                            subtype_targets = shuffled
+                    per_sample_aux = F.binary_cross_entropy_with_logits(
+                        aux_out, subtype_targets, reduction='none',
+                    ).mean(dim=1)
                 elif getattr(config, 'aux_vad_cluster_scope', 'global') == 'per_class':
                     # Subtype-within-class target: happy-1, happy-2, angry-1...
                     cluster_ids, aux_mask = batch_per_class_cluster_ids_and_mask(
                         batch, aux_vad_centroids, device,
                     )
+                    if getattr(config, 'aux_vad_shuffle', False):
+                        # Placebo for the per-class subtype target. Permuting
+                        # within the supervised rows preserves the head, its
+                        # parameter count, the label marginal and the number
+                        # of supervised samples, so the only thing removed is
+                        # whether the subtype belongs to the utterance.
+                        valid = aux_mask.nonzero(as_tuple=True)[0]
+                        if valid.numel() > 1:
+                            perm = valid[torch.randperm(valid.numel(),
+                                                        device=device)]
+                            shuffled = cluster_ids.clone()
+                            shuffled[valid] = cluster_ids[perm]
+                            cluster_ids = shuffled
                     per_sample_aux = F.cross_entropy(
                         aux_out, cluster_ids, reduction='none',
                     )
@@ -889,6 +1492,36 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     per_sample_aux = F.cross_entropy(
                         aux_out, cluster_ids, reduction='none',
                     )
+                if (getattr(config, 'aux_vad_agreement_weight', False)
+                        and 'annot_vad_std' in batch):
+                    # A contested utterance carries a VAD target that summarises
+                    # an argument rather than measuring anything, so the head is
+                    # asked to fit noise. Down-weight by annotator spread, with
+                    # a floor for the unanimous rows whose std is exactly zero.
+                    spread = torch.clamp(
+                        batch['annot_vad_std'].to(device), min=0.25,
+                    ).mean(dim=1)
+                    agree_w = 1.0 / (1.0 + spread)
+                    # Rows the annotator join did not cover carry a std of
+                    # zero because the data is absent, not because everyone
+                    # agreed. The floor turns that into the largest weight in
+                    # the batch, so absent evidence would read as perfect
+                    # agreement and get up-weighted 1.44x over real rows.
+                    # Give them the mean weight of the covered rows instead,
+                    # which leaves them exactly neutral.
+                    has_meta = batch['annot_mask'].to(device) > 0
+                    if has_meta.any():
+                        agree_w = torch.where(has_meta, agree_w,
+                                              agree_w[has_meta].mean())
+                    covered = aux_mask > 0
+                    if covered.any():
+                        # Renormalise over the covered rows so the auxiliary
+                        # term keeps the magnitude of the unweighted arm and
+                        # the comparison is about where capacity goes, not how
+                        # much of it there is.
+                        agree_w = agree_w / agree_w[covered].mean().clamp_min(1e-6)
+                    aux_mask = aux_mask * agree_w
+
                 # Average over samples with real VAD only.
                 denom = aux_mask.sum().clamp_min(1.0)
                 loss_aux_vad = (per_sample_aux * aux_mask).sum() / denom
@@ -897,6 +1530,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             adv_weight = getattr(config, 'adversarial_weight', 0.0)
             modality_adv_weight = getattr(config, 'modality_adv_weight', 0.0)
             proto_pred_weight = getattr(config, 'proto_predictor_weight', 0.0)
+            # Optional linear ramp. At full weight from step one the auxiliary
+            # head competes with classification while the shared embedding is
+            # still random, so the target it fits is noise; ramping lets the
+            # embedding form first.
+            pp_warm = int(getattr(config, 'proto_predictor_warmup_epochs', 0))
+            if pp_warm > 0 and current_epoch < pp_warm:
+                proto_pred_weight *= (current_epoch + 1) / pp_warm
+            # Anneal to zero over the final N epochs. If the auxiliary task
+            # helps by shaping the encoder early and only adds noise later,
+            # this keeps the benefit and drops the cost; it also makes the
+            # SWA window pure main-task, so a gain that survives cannot be a
+            # late-training calibration nudge.
+            pp_anneal = int(getattr(config, 'proto_predictor_anneal_epochs', 0))
+            if pp_anneal > 0:
+                total = int(getattr(config, 'num_epochs', 20))
+                start = max(0, total - pp_anneal)
+                if current_epoch >= start:
+                    frac = 1.0 - (current_epoch - start + 1) / pp_anneal
+                    proto_pred_weight *= max(0.0, frac)
             cross_modal_weight = getattr(config, 'cross_modal_weight', 0.1)
             vadmix_weight = getattr(config, 'vadmix_weight', 1.0) if use_vadmix else 0.0
             aux_vad_weight = (float(getattr(config, 'aux_vad_cluster_weight', 0.2))
@@ -909,7 +1561,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     + cross_modal_weight * loss_cross_modal
                     + vadmix_weight * loss_vadmix
                     + aux_vad_weight * loss_aux_vad
-                    + float(getattr(config, 'muted_mixup_weight', 0.5)) * loss_muted)
+                    + float(getattr(config, 'muted_mixup_weight', 0.5)) * loss_muted
+                    + float(getattr(config, 'detector_fusion_weight', 0.5))
+                    * loss_det_fusion
+                    + float(getattr(config, 'consistent_mixup_weight', 0.5))
+                    * loss_consistent)
 
         # Track losses (unscaled values)
         total_loss += loss.item()
@@ -932,7 +1588,50 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
 
         # Backward (scale loss for gradient accumulation)
         scaled_loss = loss / accum_steps
-        if use_amp:
+        use_pcgrad = (bool(getattr(config, 'proto_pcgrad', False))
+                      and proto_predictor is not None
+                      and proto_pred_weight > 0.0
+                      and torch.is_tensor(loss_proto_pred)
+                      and loss_proto_pred.requires_grad)
+        if use_pcgrad:
+            # Gradient surgery (PCGrad, Yu et al. 2020). The permuted control
+            # costs 0.3 to 0.9 accuracy on every corpus, which is interference:
+            # its target carries no information, so the only thing its gradient
+            # can do to the shared trunk is fight the classification loss.
+            #
+            # Here the auxiliary gradient is projected onto the orthogonal
+            # complement of the main gradient wherever the two conflict, so the
+            # auxiliary task can only move the representation in directions
+            # that do not oppose classification. Where they already agree the
+            # auxiliary gradient passes through untouched.
+            #
+            # Costs one extra backward pass over the shared trunk per step.
+            # Applied per parameter tensor rather than on one flattened vector:
+            # the flattened version lets a large conflict in one layer cancel
+            # agreement in another, which is not the intent.
+            main_loss = scaled_loss - (proto_pred_weight * loss_proto_pred) / accum_steps
+            aux_loss = (proto_pred_weight * loss_proto_pred) / accum_steps
+            params = [p_ for p_ in model.parameters() if p_.requires_grad]
+            g_main = torch.autograd.grad(
+                scaler.scale(main_loss) if use_amp else main_loss,
+                params, retain_graph=True, allow_unused=True)
+            g_aux = torch.autograd.grad(
+                scaler.scale(aux_loss) if use_amp else aux_loss,
+                params, retain_graph=False, allow_unused=True)
+            for p_, gm, ga in zip(params, g_main, g_aux):
+                if gm is None and ga is None:
+                    continue
+                if gm is None:
+                    combined = ga
+                elif ga is None:
+                    combined = gm
+                else:
+                    dot = torch.sum(ga * gm)
+                    if dot < 0:
+                        ga = ga - dot / gm.pow(2).sum().clamp_min(1e-12) * gm
+                    combined = gm + ga
+                p_.grad = combined if p_.grad is None else p_.grad + combined
+        elif use_amp:
             scaler.scale(scaled_loss).backward()
         else:
             scaled_loss.backward()
@@ -968,7 +1667,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         metrics = calculate_classification_metrics(all_predictions, all_labels)
 
     if getattr(config, "use_muted_mixup", False):
-        print(f"   muted mixup: {muted_synth_count} synthetic samples this epoch")
+        mean_lam = (muted_lam_sum / muted_lam_n) if muted_lam_n else float('nan')
+        print(f"   muted mixup: {muted_synth_count} synthetic samples this epoch, "
+              f"mean lambda={mean_lam:.3f}")
     return {
         'loss': avg_loss,
         'primary_loss': avg_primary_loss,
@@ -1005,6 +1706,7 @@ def evaluate(model, dataloader, criterion, device, config, use_amp=False):
 
     total_loss = 0
     all_predictions = []
+    all_eval_logits = []
     all_labels = []
     all_vad_preds = []
     all_vad_targets = []
@@ -1071,6 +1773,9 @@ def evaluate(model, dataloader, criterion, device, config, use_amp=False):
                         loss = loss.mean()
                     preds = torch.argmax(logits, dim=-1).cpu().numpy()
                 all_predictions.extend(preds)
+                # Kept so neutral_auc / emo_auc can be computed downstream;
+                # both need scores, not the argmax.
+                all_eval_logits.append(logits.detach().cpu().float().numpy())
                 all_labels.extend(labels.cpu().numpy())
 
         total_loss += loss.item()
@@ -1084,6 +1789,8 @@ def evaluate(model, dataloader, criterion, device, config, use_amp=False):
         metrics = calculate_vad_metrics(vad_preds, vad_targets)
     else:
         metrics = calculate_classification_metrics(all_predictions, all_labels)
+        if all_eval_logits:
+            metrics['logits'] = np.concatenate(all_eval_logits, axis=0)
 
     result = {
         'loss': avg_loss,
@@ -1178,6 +1885,10 @@ def _cm_class_names(config):
     if bool(getattr(config, 'binary_neutral', False)):
         return ['neutral', 'emotional']
     names = ['neutral', 'happy', 'sad', 'angry']
+    if bool(getattr(config, 'drop_neutral', False)):
+        # Neutral is gone and the rest shifted down, so slicing from the
+        # front would silently mislabel every class.
+        names = names[1:]
     return names[:int(getattr(config, 'num_classes', 4))]
 
 
@@ -1368,8 +2079,17 @@ def save_checkpoint(config, epoch, global_step, model, optimizer, scheduler,
                     scaler, contrastive_criterion, domain_discriminator,
                     modality_discriminator, proto_predictor,
                     best_val_metric, best_model_state, best_contrastive_state,
-                    epochs_without_improvement, wandb_run_id):
-    """Atomic checkpoint save: write to .tmp then rename."""
+                    epochs_without_improvement, wandb_run_id,
+                    swa_window=None):
+    """Atomic checkpoint save: write to .tmp then rename.
+
+    swa_window is persisted because it is not recoverable after the fact. It
+    holds the trailing per-epoch weight copies that model_selection
+    'swa_last_n' averages at the end of training. A resumed run skips every
+    completed epoch, so without this the window would be empty, the SWA branch
+    would not fire, and selection would fall back to best_val silently, giving
+    a model chosen by a different rule than its sibling seeds.
+    """
     ckpt_dir, latest_path, status_path, _ = get_checkpoint_paths(config)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1401,6 +2121,8 @@ def save_checkpoint(config, epoch, global_step, model, optimizer, scheduler,
         state['modality_discriminator_state_dict'] = modality_discriminator.state_dict()
     if proto_predictor is not None:
         state['proto_predictor_state_dict'] = proto_predictor.state_dict()
+    if swa_window is not None:
+        state['swa_window'] = swa_window
 
     tmp_path = latest_path.with_suffix('.pt.tmp')
     torch.save(state, tmp_path)
@@ -1462,6 +2184,7 @@ def load_checkpoint(config, model, optimizer, scheduler, scaler,
         'best_contrastive_state': state.get('best_contrastive_state'),
         'epochs_without_improvement': state['epochs_without_improvement'],
         'wandb_run_id': state.get('wandb_run_id'),
+        'swa_window': state.get('swa_window'),
     }
 
 
@@ -1470,7 +2193,7 @@ def mark_run_done(config, results):
     ckpt_dir, latest_path, status_path, results_path = get_checkpoint_paths(config)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Serialize results — strip tensors/non-JSON by converting to plain python
+    # Serialize results - strip tensors/non-JSON by converting to plain python
     def _clean(obj):
         if isinstance(obj, dict):
             return {k: _clean(v) for k, v in obj.items()
@@ -1500,7 +2223,7 @@ def mark_run_done(config, results):
     with open(status_path, 'w') as f:
         json.dump(status, f, indent=2)
 
-    # Keep latest.pt around in case user wants to resume from last state —
+    # Keep latest.pt around in case user wants to resume from last state -
     # but it's large, so delete to save disk. Best model is in saved_models/.
     if latest_path.exists():
         latest_path.unlink()
@@ -1553,12 +2276,74 @@ def train(config, datasets=None):
     val_indices = []
 
     split_rng = np.random.RandomState(int(config.seed))
-    for label in sorted(class_indices.keys()):
-        indices = class_indices[label]
-        split_rng.shuffle(indices)
-        val_size = max(1, int(len(indices) * config.val_split))
-        val_indices.extend(indices[:val_size])
-        train_indices.extend(indices[val_size:])
+    if bool(getattr(config, 'val_split_by_speaker', False)):
+        # Speaker-disjoint validation. The class-stratified split below puts
+        # utterances from the same speaker on both sides, so validation
+        # measures performance on speakers the model has already fitted and
+        # cannot be an honest generalisation estimate. Here whole speakers go
+        # to one side or the other.
+        #
+        # Speakers are consumed in random order until the validation share is
+        # reached, so class balance is approximate rather than exact. With
+        # 2,748 speakers on MSP-Podcast the law of large numbers keeps it
+        # close; on a corpus with few speakers it will not, which is why this
+        # is opt-in rather than the default.
+        #
+        # Note this changes which rows are TRAINED on, so runs made with it
+        # are not comparable to runs made without it.
+        speakers = defaultdict(list)
+        for idx in range(total_samples):
+            speakers[train_dataset.data[idx].get('speaker', f'row{idx}')].append(idx)
+        order = sorted(speakers.keys())
+        split_rng.shuffle(order)
+        target = int(total_samples * config.val_split)
+        taken = 0
+        val_speakers = set()
+        for spk in order:
+            if taken >= target:
+                break
+            val_speakers.add(spk)
+            taken += len(speakers[spk])
+        for spk, idxs in speakers.items():
+            (val_indices if spk in val_speakers else train_indices).extend(idxs)
+        val_dist = {}
+        for idx in val_indices:
+            val_dist[strat_labels[idx]] = val_dist.get(strat_labels[idx], 0) + 1
+        print(f"  Speaker-disjoint split: {len(val_speakers)} of {len(speakers)} "
+              f"speakers held out, {len(val_indices)} rows "
+              f"({100.0 * len(val_indices) / max(1, total_samples):.1f} percent)")
+        print(f"   Val class counts: {dict(sorted(val_dist.items()))}")
+    else:
+        for label in sorted(class_indices.keys()):
+            indices = class_indices[label]
+            split_rng.shuffle(indices)
+            val_size = max(1, int(len(indices) * config.val_split))
+            val_indices.extend(indices[:val_size])
+            train_indices.extend(indices[val_size:])
+
+    # Optional class-stratified subsample of the TRAINING pool only.
+    #
+    # Unfrozen runs carry no frame cache and push raw audio through
+    # emotion2vec forward and backward every step, measured at 47 minutes per
+    # epoch on the full 80,941-row pool, which makes a multi-arm sweep
+    # impossible. Subsampling is legitimate for a controlled comparison as
+    # long as every arm draws the same rows, which the fixed seed guarantees.
+    # Validation is deliberately left at full size so model selection and the
+    # reported val metrics stay comparable to the full-data runs.
+    frac = float(getattr(config, 'train_subsample_frac', 1.0))
+    if 0.0 < frac < 1.0:
+        sub_rng = np.random.RandomState(int(config.seed) + 12345)
+        by_class = defaultdict(list)
+        for idx in train_indices:
+            by_class[strat_labels[idx]].append(idx)
+        kept = []
+        for label in sorted(by_class):
+            pool = list(by_class[label])
+            sub_rng.shuffle(pool)
+            kept.extend(pool[:max(1, int(round(len(pool) * frac)))])
+        print(f"  Train subsample: {len(train_indices)} -> {len(kept)} rows "
+              f"(frac={frac}, class-stratified, seed-fixed)")
+        train_indices = kept
 
     # Deterministic order so dumped prediction rows align across arms.
     train_indices.sort()
@@ -1815,6 +2600,74 @@ def train(config, datasets=None):
     # once over VAD points from the training split (across all VAD-annotated
     # corpora combined). The centroids are stored as a tensor and the aux
     # head lives inside the model (added conditionally by create_model).
+    # Target-intensity bound for VAD-calibrated muted mixup, computed once over
+    # the training split. A batch holds only a handful of emotional samples, so
+    # a batch-local quantile would make the target drift with batch composition.
+    if (bool(getattr(config, 'use_muted_mixup', False))
+            and bool(getattr(config, 'muted_mixup_vad_calibrated', False))):
+        exp_vad_cfg = getattr(config, 'expected_vad', None) or {}
+        neutral_centre_cfg = exp_vad_cfg.get(0) or exp_vad_cfg.get('0')
+        if neutral_centre_cfg is None:
+            raise ValueError(
+                "muted_mixup_vad_calibrated needs expected_vad[0] as the "
+                "neutral centre, but expected_vad is missing or has no key 0."
+            )
+        centre_np = np.asarray(neutral_centre_cfg, dtype=np.float64)
+        dists = []
+        for i in train_indices:
+            row = train_dataset.data[i]
+            if row.get('label', 0) == 0:
+                continue
+            dists.append(np.linalg.norm(
+                np.array([row.get('valence', 0.0), row.get('arousal', 0.0),
+                          row.get('dominance', 0.0)], dtype=np.float64) - centre_np))
+        q = float(getattr(config, 'muted_mixup_vad_quantile', 0.5))
+        config._muted_vad_span = float(np.quantile(dists, q)) if dists else None
+        print(f"  Muted mixup VAD calibration: {len(dists)} emotional train "
+              f"samples, intensity q{q:.2f} span={config._muted_vad_span:.4f}, "
+              f"shuffle_control={bool(getattr(config, 'muted_mixup_vad_shuffle', False))}")
+
+        if bool(getattr(config, 'muted_mixup_sparse_fill', False)):
+            # Per class, decide which intensity end is thin and aim there.
+            n_cls = int(getattr(config, 'num_classes', 4))
+            per_class = {c: [] for c in range(1, n_cls)}
+            for i in train_indices:
+                row = train_dataset.data[i]
+                lab = row.get('label', 0)
+                if lab == 0 or lab not in per_class:
+                    continue
+                per_class[lab].append(np.linalg.norm(
+                    np.array([row.get('valence', 0.0), row.get('arousal', 0.0),
+                              row.get('dominance', 0.0)],
+                             dtype=np.float64) - centre_np))
+            only = set(getattr(config, 'muted_mixup_sparse_classes', []) or [])
+            tq = float(getattr(config, 'muted_mixup_sparse_target_q', 0.1))
+            direction = [0] * n_cls
+            target = [0.0] * n_cls
+            for c, vals in per_class.items():
+                if not vals or (only and c not in only):
+                    continue
+                arr = np.asarray(vals)
+                lo_q, hi_q = np.quantile(arr, 0.25), np.quantile(arr, 0.75)
+                n_lo = int((arr <= lo_q).sum())
+                n_hi = int((arr >= hi_q).sum())
+                # Thin at the quiet end means mute; thin when loud means amplify.
+                if n_lo <= n_hi:
+                    direction[c] = -1
+                    target[c] = float(np.quantile(arr, tq))
+                else:
+                    direction[c] = +1
+                    target[c] = float(np.quantile(arr, 1.0 - tq))
+            config._sparse_direction = direction
+            config._sparse_target = target
+            names = ['neutral', 'happy', 'sad', 'angry']
+            print("  Sparse-fill mixup targets:")
+            for c in range(1, n_cls):
+                nm = names[c] if c < len(names) else f"class{c}"
+                verb = {-1: 'mute', 1: 'amplify', 0: 'skip'}[direction[c]]
+                print(f"    {nm:8s} n={len(per_class.get(c, [])):>6d} "
+                      f"{verb:8s} target={target[c]:.4f}")
+
     use_aux_vad = bool(getattr(config, 'use_aux_vad_cluster', False))
     aux_vad_centroids = None
     if use_aux_vad:
@@ -1823,6 +2676,51 @@ def train(config, datasets=None):
             # Regression arm predicts raw VAD; no centroids to fit.
             print(f"  Aux VAD regression multitask enabled: "
                   f"weight={getattr(config, 'aux_vad_cluster_weight', 0.2)}")
+        elif aux_task == 'resid_cluster':
+            # Cluster whitened residuals rather than raw VAD. Needs the class
+            # centres and covariances fitted from the training split, which is
+            # also what makes the residual well defined.
+            n_cls = int(getattr(config, 'num_classes', 4))
+            k_res = int(getattr(config, 'aux_resid_cluster_k', 6))
+            scope = getattr(config, 'aux_vad_cluster_scope', 'shared')
+            _rm, _ri = class_vad_stats(
+                [train_dataset.data[i] for i in train_indices], n_cls,
+                consensus_q=float(getattr(config, 'proto_centroid_consensus_q', 0.0)))
+            _rw = whitening_matrices(_ri)
+            config._resid_means = _rm
+            config._resid_whiten = _rw
+            # Stashed on config rather than threaded through train_epoch's
+            # signature: they are fixed constants fitted once from the
+            # training split, and every call site already receives config.
+            config._resid_means_t = torch.tensor(
+                _rm, dtype=torch.float32).to(device)
+            config._resid_whiten_t = torch.tensor(
+                _rw, dtype=torch.float32).to(device)
+            centroids_np = build_residual_centroids(
+                train_data=[train_dataset.data[i] for i in train_indices],
+                means=_rm, whiten=_rw, k=k_res, num_classes=n_cls,
+                scope=scope, seed=int(getattr(config, 'seed', 42)),
+            )
+            aux_vad_centroids = torch.tensor(
+                centroids_np, dtype=torch.float32).to(device)
+            n_labels = (n_cls * k_res if scope == 'per_class' else k_res)
+            print(f"  Aux residual-cluster multitask enabled:")
+            print(f"   scope={scope}, k={k_res} -> {n_labels} labels, "
+                  f"weight={getattr(config, 'aux_vad_cluster_weight', 0.2)}, "
+                  f"shuffle={getattr(config, 'aux_vad_shuffle', False)}")
+            print(f"   fitted class centres: {np.round(_rm, 4).tolist()}")
+            if scope != 'per_class':
+                for j in range(k_res):
+                    print(f"     mode {j}: dV={centroids_np[j, 0]:+.3f} "
+                          f"dA={centroids_np[j, 1]:+.3f} "
+                          f"dD={centroids_np[j, 2]:+.3f}")
+        elif aux_task == 'subtype':
+            # Targets come from the annotator metadata join, so there is
+            # nothing to fit here either.
+            print(f"  Aux annotator-subtype multitask enabled: "
+                  f"{len(SUBTYPE_NAMES)} tags, "
+                  f"weight={getattr(config, 'aux_vad_cluster_weight', 0.2)}, "
+                  f"shuffle={getattr(config, 'aux_vad_shuffle', False)}")
         elif getattr(config, 'aux_vad_cluster_scope', 'global') == 'per_class':
             # One k-means inside each class: happy-1..happy-n, angry-1..angry-n.
             kpc = int(getattr(config, 'aux_vad_clusters_per_class', 2))
@@ -1903,18 +2801,60 @@ def train(config, datasets=None):
         if explicit_w:
             print(f"   Explicit per-corpus weights: {explicit_w}")
 
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=config.batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        drop_last=True,
-        collate_fn=vad_collate_fn,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent,
-        prefetch_factor=prefetch,
-    )
+    # Length-bucketed batching for raw-audio runs. The collate pads to the
+    # longest waveform in the batch, so random batching wastes ~40% of the
+    # compute on padding and the waste grows with batch size. Grouping similar
+    # durations cuts it to under 2%.
+    length_sampler = None
+    if (bool(getattr(config, 'use_length_bucketing', False))
+            and getattr(train_dataset, 'uses_raw_audio', False)
+            and train_sampler is None):
+        try:
+            durations = load_or_compute_durations(
+                train_dataset.dataset_name, train_dataset.hf_dataset)
+            # Map each position in the Subset back to its row duration.
+            subset_durs = np.array([
+                durations[train_dataset.data[i]['hf_idx']]
+                for i in train_indices], dtype=np.float32)
+            length_sampler = LengthBucketedBatchSampler(
+                durations=subset_durs,
+                indices=range(len(train_indices)),
+                batch_size=config.batch_size,
+                window_batches=int(getattr(config, 'length_bucket_window', 50)),
+                drop_last=True,
+                seed=int(getattr(config, 'seed', 42)),
+            )
+            print(f"  Length bucketing enabled: {len(length_sampler)} batches, "
+                  f"durations {subset_durs.min():.1f}-{subset_durs.max():.1f}s "
+                  f"(mean {subset_durs.mean():.1f}s)")
+        except Exception as e:
+            print(f"  Length bucketing unavailable ({e}); falling back to "
+                  f"random batching")
+            length_sampler = None
+
+    if length_sampler is not None:
+        train_loader = DataLoader(
+            train_subset,
+            batch_sampler=length_sampler,
+            collate_fn=vad_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
+            prefetch_factor=prefetch,
+        )
+    else:
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=config.batch_size,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            drop_last=True,
+            collate_fn=vad_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
+            prefetch_factor=prefetch,
+        )
     val_loader = DataLoader(
         val_subset,
         batch_size=eval_batch_size,
@@ -1949,7 +2889,7 @@ def train(config, datasets=None):
 
     # Cache frozen encoder features: compute once, reuse every epoch (~100x faster)
     audio_encoder_type = getattr(config, 'audio_encoder_type', 'preextracted')
-    if (audio_encoder_type in ('wav2vec2', 'emotion2vec')
+    if (audio_encoder_type in RAW_AUDIO_ENCODERS
             and getattr(config, 'unfreeze_audio_layers', 0) == 0
             and hasattr(model, 'audio_encoder') and model.audio_encoder is not None):
         print(f"\n  Caching frozen encoder features (one-time cost)...")
@@ -2045,6 +2985,27 @@ def train(config, datasets=None):
             criterion = nn.CrossEntropyLoss(weight=freq_weights_tensor, reduction='none')
             print(f"   Prototypical weighting: {use_proto_weight} (alpha={getattr(config, 'prototypical_weighting_alpha', 2.0)})")
             print(f"   Label smoothing: {use_label_smooth} (beta={getattr(config, 'label_smoothing_beta', 0.5)}, max={getattr(config, 'label_smoothing_max', 0.6)})")
+        elif bool(getattr(config, 'use_ldam_margin', False)):
+            # Class-dependent margin. Inverse-frequency weighting corrects the
+            # PRIOR, which a model can satisfy by sliding the decision
+            # boundary; a margin requires the true class to beat the others by
+            # a gap, which a uniform shift cannot produce. Measured motivation:
+            # the auxiliary arms raised emotion-vs-emotion AUC on 4/4 corpora
+            # while UAR stayed flat, i.e. the gain sat just under the boundary.
+            _counts = np.bincount(
+                [train_dataset.data[i]['label'] for i in train_indices],
+                minlength=int(config.num_classes))
+            criterion = LDAMLoss(
+                class_counts=_counts,
+                max_margin=float(getattr(config, 'ldam_max_margin', 0.5)),
+                scale=float(getattr(config, 'ldam_scale', 30.0)),
+                weight=freq_weights_tensor,
+            ).to(device)
+            print(f"   LDAM margin: max={getattr(config, 'ldam_max_margin', 0.5)}, "
+                  f"scale={getattr(config, 'ldam_scale', 30.0)}, "
+                  f"counts={_counts.tolist()}")
+            print(f"   per-class margins: "
+                  f"{criterion.margins.cpu().numpy().round(4).tolist()}")
         else:
             criterion = nn.CrossEntropyLoss(weight=freq_weights_tensor)
 
@@ -2163,16 +3124,139 @@ def train(config, datasets=None):
         ).to(device)
         print(f"   Learnable centroids: mode={centroid_tracker.mode}, momentum={centroid_tracker.momentum}")
 
+    if bool(getattr(config, 'use_proto_dist_logits', False)):
+        n_cls = int(getattr(config, 'num_classes', 4))
+        _dm, _di = class_vad_stats(
+            [train_dataset.data[i] for i in train_indices], n_cls,
+            consensus_q=float(getattr(config, 'proto_centroid_consensus_q', 0.0)))
+        _dw = whitening_matrices(_di)
+        if bool(getattr(config, 'proto_dist_permute', False)):
+            # Control: give each class another class's prototype and
+            # covariance. The stream keeps its shape, its parameter and its
+            # gradient path; only the geometry stops corresponding to the
+            # class it scores. A gain that survives this is not prototype
+            # structure.
+            rng = np.random.RandomState(int(getattr(config, 'seed', 42)))
+            perm = rng.permutation(n_cls)
+            while n_cls > 1 and (perm == np.arange(n_cls)).all():
+                perm = rng.permutation(n_cls)
+            _dm, _dw = _dm[perm], _dw[perm]
+            print(f"   Prototype-distance PERMUTED control: mapping {perm.tolist()}")
+        model.set_proto_dist_reference(_dm, _dw)
+        print(f"   Prototype-distance alpha floor: "
+              f"{float(getattr(config, 'proto_dist_alpha_min', 0.0)):g}")
+        print(f"   Prototype-distance reference installed: "
+              f"centres {np.round(_dm, 4).tolist()}")
+
+
     # Auxiliary prototypicality predictor
     proto_predictor = None
     if getattr(config, 'use_proto_predictor', False):
         proto_hidden = getattr(config, 'proto_predictor_hidden_dim', 256)
+        # Fit the class centres and covariances from the training split. The
+        # configured prototypes are constants and are off by 0.066 for angry,
+        # which is 40 percent of that class's own scatter.
+        proto_target = str(getattr(config, 'proto_target', 'scalar'))
+        proto_metric = str(getattr(config, 'proto_metric', 'euclidean'))
+        n_cls = int(getattr(config, 'num_classes', 4))
+        # Which VAD axes the prototypicality target uses. Dominance is the
+        # axis annotators compress into the narrowest range (p5-p95 of 2.80
+        # against 3.25 for valence) while disagreeing about as much in
+        # absolute terms, so it is the least reliable of the three relative to
+        # its own spread, and whitening by class scatter UP-weights it because
+        # its variance is smallest. Dropping it is the direct test of whether
+        # it contributes or costs.
+        _dims = tuple(getattr(config, 'proto_vad_dims', (0, 1, 2)))
+        config._proto_dims = _dims
+        _pm, _pi = class_vad_stats(
+            [train_dataset.data[i] for i in train_indices], n_cls,
+            consensus_q=float(getattr(config, 'proto_centroid_consensus_q', 0.0)),
+            dims=_dims,
+            consensus_source=str(getattr(config, 'proto_consensus_source', 'class')))
+        config._proto_means = _pm
+        config._proto_inv_covs = _pi
+        _wscope = str(getattr(config, 'proto_whiten_scope', 'per_class'))
+        if proto_metric != 'mahalanobis':
+            config._proto_whiten = None
+        elif _wscope == 'shared':
+            config._proto_whiten = pooled_whitening(
+                [train_dataset.data[i] for i in train_indices], _pm, n_cls,
+                consensus_q=float(getattr(config, 'proto_centroid_consensus_q', 0.0)))
+        else:
+            config._proto_whiten = whitening_matrices(_pi)
+
+        # Pool of real residuals over the whole TRAINING split, for the
+        # control variants that draw a target unrelated to the sample.
+        #
+        # The default control permutes targets within the batch, which has two
+        # cosmetic defects: a random permutation has exactly one fixed point in
+        # expectation regardless of size, so about 6 percent of samples at
+        # batch 16 receive their own target, and batches are length-bucketed
+        # rather than random. Measurement says the second does not matter here
+        # (duration against residual magnitude correlates -0.031, and mean
+        # duration varies by 3 percent across the four classes), but drawing
+        # from the full pool removes both concerns and is simpler to state:
+        # each control target is a real residual drawn independently of the
+        # input.
+        _pool = None
+        if str(getattr(config, 'proto_shuffle_mode', 'batch')) != 'batch':
+            _pool_vad = np.array(
+                [[train_dataset.data[i].get('valence', 0.0),
+                  train_dataset.data[i].get('arousal', 0.0),
+                  train_dataset.data[i].get('dominance', 0.0)]
+                 for i in train_indices], dtype=np.float64)[:, list(_dims)]
+            _pool_lab = np.array(
+                [train_dataset.data[i]['label'] for i in train_indices])
+            _finite = np.isfinite(_pool_vad).all(axis=1)
+            _pool_rows = residual_targets(
+                _pool_vad[_finite], _pool_lab[_finite], _pm,
+                whiten=config._proto_whiten)
+            _pool = torch.tensor(_pool_rows, dtype=torch.float32)
+            print(f"   Control pool: {_pool.shape[0]} training residuals, "
+                  f"mode={getattr(config, 'proto_shuffle_mode')}")
+        config._proto_pool = _pool
+
+        if proto_target == 'offlabel':
+            proto_out = n_cls
+        elif proto_target == 'dispersion':
+            proto_out = len(_dims)
+        elif proto_target == 'agreement':
+            proto_out = 1
+        elif proto_target == 'presidual':
+            proto_out = len(_dims)
+        elif proto_target == 'resdisp':
+            proto_out = len(_dims) * 2
+        elif proto_target in ('residual', 'absresidual', 'invresidual',
+                              'rawvad'):
+            proto_out = len(_dims)
+        elif proto_target == 'allclass':
+            proto_out = len(_dims) * n_cls
+        elif proto_target == 'signed':
+            proto_out = 2
+        elif proto_target == 'subtype':
+            kpc = int(getattr(config, 'aux_vad_clusters_per_class', 2))
+            centroids = build_per_class_vad_centroids(
+                train_data=[train_dataset.data[i] for i in train_indices],
+                clusters_per_class=kpc, num_classes=n_cls,
+                seed=int(getattr(config, 'seed', 42)))
+            config._proto_subtype_centroids = centroids
+            proto_out = n_cls * kpc
+        else:
+            proto_out = 1
+
         proto_predictor = PrototypicalityPredictor(
             input_dim=config.hidden_dim,
             hidden_dim=proto_hidden,
+            output_dim=proto_out,
         ).to(device)
-        print(f"   Proto predictor: {config.hidden_dim} -> {proto_hidden} -> 1")
+        print(f"   Proto predictor: {config.hidden_dim} -> {proto_hidden} "
+              f"-> {proto_out}  (target={proto_target}, metric={proto_metric})")
         print(f"   Proto predictor weight: {getattr(config, 'proto_predictor_weight', 0.5)}")
+        _cq = float(getattr(config, 'proto_centroid_consensus_q', 0.0))
+        print(f"   Prototype fitting: consensus_q={_cq}"
+              f"{' (all samples)' if _cq <= 0 else ' (high-agreement only)'}")
+        print(f"   Fitted class centres: "
+              f"{np.round(_pm, 4).tolist()}")
 
     # Optimizer - differential LR for unfrozen BERT and Wav2Vec2 layers
     unfreeze_bert = getattr(config, 'unfreeze_bert_layers', 0)
@@ -2193,7 +3277,7 @@ def train(config, datasets=None):
         print(f"   BERT LR: {bert_lr:.2e}")
 
     # Wav2Vec2 / Emotion2Vec differential LR
-    if audio_encoder_type in ("wav2vec2", "emotion2vec") and unfreeze_audio > 0 and hasattr(model, 'audio_encoder') and model.audio_encoder is not None:
+    if audio_encoder_type in RAW_AUDIO_ENCODERS and unfreeze_audio > 0 and hasattr(model, 'audio_encoder') and model.audio_encoder is not None:
         audio_params = model.audio_encoder.get_audio_params()
         special_param_ids.update(id(p) for p in audio_params)
         param_groups.append({'params': audio_params, 'lr': audio_lr})
@@ -2256,7 +3340,7 @@ def train(config, datasets=None):
         modality_discriminator, proto_predictor, device,
     )
 
-    # Initialize WandB — resume existing run if we have a run ID
+    # Initialize WandB - resume existing run if we have a run ID
     wandb_init_kwargs = {
         'project': config.wandb_project,
         'name': config.experiment_name,
@@ -2322,6 +3406,15 @@ def train(config, datasets=None):
         best_model_state = resume_state['best_model_state']
         best_contrastive_state = resume_state.get('best_contrastive_state')
         epochs_without_improvement = resume_state['epochs_without_improvement']
+        # Restore the trailing weight window used by model_selection
+        # 'swa_last_n'. A resumed run skips every completed epoch, so without
+        # this the window stays empty, the averaging branch does not fire, and
+        # selection falls back to best_val without saying so, producing a model
+        # chosen by a different rule than its sibling seeds.
+        if swa_window is not None and resume_state.get('swa_window'):
+            swa_window = list(resume_state['swa_window'])
+            print(f"   Restored SWA window: {len(swa_window)} epoch(s) of "
+                  f"trailing weights")
 
     # Determine training stages
     if use_two_stage:
@@ -2380,7 +3473,7 @@ def train(config, datasets=None):
             persistent_workers=persistent,
         )
 
-        # Apply LR factor for stage 2 (skip on resume — already in optimizer state)
+        # Apply LR factor for stage 2 (skip on resume - already in optimizer state)
         if lr_factor != 1.0 and resume_state is None:
             for pg in optimizer.param_groups:
                 pg['lr'] = pg['lr'] * lr_factor
@@ -2398,6 +3491,11 @@ def train(config, datasets=None):
 
             global_epoch += 1
             print(f"\n  Epoch {global_epoch}/{config.num_epochs} ({stage_name})")
+
+            # Reshuffle the length buckets so batch composition varies across
+            # epochs rather than repeating the same groupings every time.
+            if length_sampler is not None:
+                length_sampler.set_epoch(global_epoch)
 
             # Curriculum learning: rebuild the training loader each epoch from
             # a paced subset of stage_indices. global_epoch is 1-based here, so
@@ -2582,6 +3680,32 @@ def train(config, datasets=None):
                 if wandb.run is not None:
                     wandb.log({'proto_atyp/confidence_frozen_epoch': global_epoch})
 
+            # Optional per-epoch evaluation on the test corpora. OFF BY
+            # DEFAULT and it should stay off for production runs: it costs an
+            # extra pass over every test set each epoch, measured at about 23
+            # percent wall time (sv_base took 3h05m against the usual 2h30m at
+            # 2/2), and used carelessly it is test-set peeking.
+            #
+            # It exists to answer one question: does the validation score
+            # track cross-corpus transfer AS TRAINING PROCEEDS. That is what
+            # early stopping needs and it cannot be answered from end-of-run
+            # numbers, which give one point per run. The trace is written to
+            # the log for offline correlation and is never read by training,
+            # model selection, or the reported results.
+            if bool(getattr(config, 'trace_test_each_epoch', False)):
+                _trace = {}
+                for _tl, _td in zip(test_loaders, test_datasets):
+                    _tm = evaluate(model, _tl, criterion, device, config, use_amp)
+                    _trace[_td.dataset_name] = (
+                        float(_tm.get('uar', float('nan'))),
+                        float(_tm.get('neutral_auc', float('nan'))),
+                    )
+                _vu = float(val_metrics.get('uar', float('nan')))
+                print("   EPOCHTRACE epoch=%d val_uar=%.4f " % (global_epoch, _vu)
+                      + " ".join(f"{k}_uar={v[0]:.4f} {k}_nauc={v[1]:.4f}"
+                                 for k, v in sorted(_trace.items())))
+                model.train()
+
             # Running tail of weights for the SWA selection mode. Only
             # trainable parameters are kept: the audio and text encoders are
             # frozen, so their weights are identical every epoch and holding
@@ -2602,6 +3726,7 @@ def train(config, datasets=None):
                 modality_discriminator, proto_predictor,
                 best_val_metric, best_model_state, best_contrastive_state,
                 epochs_without_improvement, wandb_run_id,
+                swa_window=swa_window,
             )
 
             if early_stop_triggered:
@@ -2689,15 +3814,30 @@ def train(config, datasets=None):
             emb_metrics = collapse_metrics(
                 test_emb, test_emb_labels, int(config.num_classes),
             )
+            # Threshold-free split of UAR: how well neutral is ranked apart
+            # from emotional, versus how well the emotions are separated from
+            # each other. A mechanism that only moves the operating point
+            # changes UAR but leaves both of these untouched.
+            tf_metrics = threshold_free_metrics(
+                np.asarray(test_metrics.get('logits',
+                                            np.zeros((0, config.num_classes)))),
+                np.asarray(test_metrics['labels']),
+                int(config.num_classes),
+            )
             # Merge so multi-seed averaging in runner.py picks them up.
             test_metrics.update(emb_metrics)
+            test_metrics.update(tf_metrics)
             print(f"      Acc: {test_metrics['accuracy']:.4f}")
             print(f"      UAR: {test_metrics['uar']:.4f}")
+            print(f"      neutral_auc: {tf_metrics['neutral_auc']:.4f}, "
+                  f"emo_auc: {tf_metrics['emo_auc']:.4f}")
             print(f"      within_var_ratio: {emb_metrics['within_var_ratio']:.4f}, "
                   f"embed_rank: {emb_metrics['effective_rank']:.1f}")
             wandb.log({
                 f'test/{dataset_name}_acc': test_metrics['accuracy'],
                 f'test/{dataset_name}_uar': test_metrics['uar'],
+                f'test/{dataset_name}_neutral_auc': tf_metrics['neutral_auc'],
+                f'test/{dataset_name}_emo_auc': tf_metrics['emo_auc'],
                 f'test/{dataset_name}_within_var_ratio': emb_metrics['within_var_ratio'],
                 f'test/{dataset_name}_embed_rank': emb_metrics['effective_rank'],
                 f'cm/test_{dataset_name}': wandb.plot.confusion_matrix(
@@ -2779,7 +3919,7 @@ def train(config, datasets=None):
         except Exception as viz_e:
             print(f"  aux_vad_viz failed: {viz_e}")
 
-    # Mark run as finished — writes results.json and status=done, removes latest.pt
+    # Mark run as finished - writes results.json and status=done, removes latest.pt
     mark_run_done(config, results)
 
     wandb.finish()

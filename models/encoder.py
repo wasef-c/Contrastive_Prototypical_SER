@@ -51,7 +51,14 @@ class FrozenBERTEncoder(nn.Module):
                 for param in self.bert.pooler.parameters():
                     param.requires_grad = True
             # Enable gradient checkpointing to save activation memory
-            self.bert.gradient_checkpointing_enable()
+            # use_reentrant=False is required, not cosmetic. The reentrant
+            # implementation only runs the checkpointed backward when some
+            # INPUT to the segment requires grad, and the embeddings and lower
+            # layers here are frozen, so every unfrozen layer received exactly
+            # zero gradient: 0 of 34 tensors, against 32 of 34 with it off.
+            # Every "unfrozen BERT" run before this fix trained nothing.
+            self.bert.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False})
             trainable = sum(p.numel() for p in self.bert.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.bert.parameters())
             print(f"🔓 {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")

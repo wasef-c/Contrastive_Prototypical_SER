@@ -10,7 +10,7 @@ import argparse
 
 from typing import Any, Dict, List, Tuple
 
-from utils.config import Config
+from utils.config import Config, RAW_AUDIO_ENCODERS
 from data.dataset import EmotionDataset, MultiCorpusDataset
 from train import train, is_run_finished, load_finished_results
 
@@ -19,7 +19,7 @@ def _needs_raw_audio(config) -> bool:
     """True when experiment requires raw waveforms (unfrozen audio encoder)."""
     audio_type = getattr(config, 'audio_encoder_type', 'preextracted')
     unfreeze = getattr(config, 'unfreeze_audio_layers', 0)
-    return (audio_type in ('wav2vec2', 'emotion2vec')) and unfreeze > 0
+    return (audio_type in RAW_AUDIO_ENCODERS) and unfreeze > 0
 
 
 def _corpus_key(corpus_name: str, config) -> Tuple[Any, ...]:
@@ -51,6 +51,20 @@ def _corpus_key(corpus_name: str, config) -> Tuple[Any, ...]:
         getattr(config, 'num_frames', 32),
         getattr(config, 'modality', 'both'),
         getattr(config, 'task_type', 'classification'),
+        # binary_neutral rewrites the 'label' field from 4 classes to 2, so a
+        # binary arm cannot share a corpus with a 4-way arm. Sharing one sends
+        # labels 2 and 3 into a 2-output head, which trips a device-side assert
+        # inside cross entropy rather than failing with a readable message.
+        bool(getattr(config, 'binary_neutral', False)),
+        # drop_neutral removes rows outright, so a three-class arm and a
+        # four-class arm cannot share a corpus object at all.
+        bool(getattr(config, 'drop_neutral', False)),
+        # use_annotator_meta attaches per-sample subtype and dispersion fields
+        # to every row. An arm without it produces items that lack those keys,
+        # and the collate function decides what to batch from the first item,
+        # so a shared corpus object would silently drop the aux targets for
+        # whichever arm was built second.
+        bool(getattr(config, 'use_annotator_meta', False)),
         _needs_raw_audio(config),
     )
 

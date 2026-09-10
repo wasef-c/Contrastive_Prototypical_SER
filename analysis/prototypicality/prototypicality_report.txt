@@ -1,0 +1,187 @@
+Prototypicality measured four ways. Each measure is a
+within-class standardized distance from a class center, so
+larger means more atypical.
+
+==============================================================================
+MSPP
+==============================================================================
+
+--- neutral (n=9067) ---
+
+  measure: vad_theoretical
+    typical   n=4539   VAD V=0.490 A=0.486 D=0.531
+    atypical  n=4528   VAD V=0.473 A=0.457 D=0.514
+    atypical-leaning affect words: success, witness, silk, contact, rebel, extraordinary, gun, traditional, ass, wanting
+
+  measure: vad_class_mean
+    typical   n=4539   VAD V=0.485 A=0.474 D=0.524
+    atypical  n=4528   VAD V=0.477 A=0.469 D=0.520
+    atypical-leaning affect words: ass, success, witness, mad, silk, contact, rebel, extraordinary, wanting, afford
+
+  measure: nrc
+    typical   n=3235   VAD V=0.490 A=0.481 D=0.531
+    atypical  n=2844   VAD V=0.473 A=0.473 D=0.523
+    atypical-leaning affect words: horror, hospital, broke, proud, death, feeling, hot, hell, hate, defense
+
+  measure: audio
+    typical   n=4534   VAD V=0.488 A=0.482 D=0.533
+    atypical  n=4533   VAD V=0.475 A=0.461 D=0.511
+    atypical-leaning affect words: socialist, prison, constant, decent, victim, personal, successful, blue, fighting, ready
+
+--- happy (n=5751) ---
+
+  measure: vad_theoretical
+    typical   n=2876   VAD V=0.655 A=0.615 D=0.614
+    atypical  n=2875   VAD V=0.623 A=0.566 D=0.582
+    atypical-leaning affect words: grateful, honorable, buddy, patron, moderate, government, affirmative, peace, recommend, committee
+
+  measure: vad_class_mean
+    typical   n=2879   VAD V=0.654 A=0.600 D=0.605
+    atypical  n=2872   VAD V=0.623 A=0.580 D=0.591
+    atypical-leaning affect words: honorable, grateful, policy, oppose, buddy, patron, moderate, government, doctor, committee
+
+  measure: nrc
+    typical   n=2067   VAD V=0.645 A=0.590 D=0.606
+    atypical  n=2066   VAD V=0.639 A=0.593 D=0.599
+    atypical-leaning affect words: falling, anxiety, immediately, peace, dance, lie, alive, surprised, feeling, leave
+
+  measure: audio
+    typical   n=2876   VAD V=0.637 A=0.591 D=0.602
+    atypical  n=2875   VAD V=0.640 A=0.590 D=0.595
+    atypical-leaning affect words: blessed, luck, explain, lucky, brother, immediately, john, finally, death, giant
+
+--- sad (n=2086) ---
+
+  measure: vad_theoretical
+    typical   n=1043   VAD V=0.348 A=0.381 D=0.455
+    atypical  n=1043   VAD V=0.354 A=0.408 D=0.454
+    atypical-leaning affect words: continue, question, white, mother, true, suffering, general, pain, reason, money
+
+  measure: vad_class_mean
+    typical   n=1045   VAD V=0.345 A=0.382 D=0.461
+    atypical  n=1041   VAD V=0.357 A=0.406 D=0.449
+    atypical-leaning affect words: continue, question, white, mother, true, general, money, important, job, kind
+
+  measure: nrc
+    typical   n=746    VAD V=0.348 A=0.413 D=0.471
+    atypical  n=743    VAD V=0.348 A=0.394 D=0.460
+    atypical-leaning affect words: deal, trust, die, lost, awful, hurt, good, money, loss, terrible
+
+  measure: audio
+    typical   n=1043   VAD V=0.353 A=0.412 D=0.473
+    atypical  n=1043   VAD V=0.348 A=0.377 D=0.437
+    atypical-leaning affect words: sick, dying, food, wrong, pay, depression, system, found, inaudible, worse
+
+--- angry (n=3096) ---
+
+  measure: vad_theoretical
+    typical   n=1549   VAD V=0.260 A=0.714 D=0.726
+    atypical  n=1547   VAD V=0.287 A=0.653 D=0.691
+    atypical-leaning affect words: debate, refuse, cop, insane, majority, tax, democracy, pandemic, interest, continue
+
+  measure: vad_class_mean
+    typical   n=1551   VAD V=0.277 A=0.683 D=0.700
+    atypical  n=1545   VAD V=0.270 A=0.684 D=0.717
+    atypical-leaning affect words: progressive, prison, officer, majority, father, pandemic, study, nigger, interest, angry
+
+  measure: nrc
+    typical   n=1117   VAD V=0.269 A=0.687 D=0.715
+    atypical  n=1113   VAD V=0.269 A=0.680 D=0.706
+    atypical-leaning affect words: honest, treat, insane, truck, vote, feeling, mad, hit, hurt, nasty
+
+  measure: audio
+    typical   n=1548   VAD V=0.278 A=0.681 D=0.706
+    atypical  n=1548   VAD V=0.268 A=0.686 D=0.711
+    atypical-leaning affect words: truck, nasty, pull, lose, rape, sense, cheat, ready, wait, fight
+
+==============================================================================
+IEMO
+==============================================================================
+
+--- neutral (n=1708) ---
+
+  measure: vad_theoretical
+    typical   n=854    VAD V=0.484 A=0.470 D=0.496
+    atypical  n=854    VAD V=0.502 A=0.393 D=0.420
+    atypical-leaning affect words: cold, liquor, wasting, money, god, lose, garbage, blanket, laugh, important
+
+  measure: vad_class_mean
+    typical   n=855    VAD V=0.490 A=0.428 D=0.456
+    atypical  n=853    VAD V=0.496 A=0.435 D=0.459
+    atypical-leaning affect words: darling, money, god, kind, cold, laugh, considerate, wasting, important, fact
+
+  measure: nrc
+    typical   n=431    VAD V=0.493 A=0.456 D=0.492
+    atypical  n=312    VAD V=0.498 A=0.452 D=0.497
+    atypical-leaning affect words: darling, garbage, laugh, wait, lose, marry, liquor, love, bad, wasting
+
+  measure: audio
+    typical   n=854    VAD V=0.486 A=0.467 D=0.509
+    atypical  n=854    VAD V=0.499 A=0.395 D=0.406
+    atypical-leaning affect words: cold, blanket, garbage, wait, sir, marry, wrong, long, good, time
+
+--- happy (n=595) ---
+
+  measure: vad_theoretical
+    typical   n=320    VAD V=0.726 A=0.567 D=0.538
+    atypical  n=275    VAD V=0.751 A=0.486 D=0.415
+    atypical-leaning affect words: found, laughter, crazy, sweet, ridiculous, guess, forgive, good, pretty, love
+
+  measure: vad_class_mean
+    typical   n=299    VAD V=0.750 A=0.519 D=0.455
+    atypical  n=296    VAD V=0.725 A=0.540 D=0.508
+    atypical-leaning affect words: wait, crazy, school, wrong, laughter, kind, long, fortune, ridiculous, love
+
+  measure: nrc
+    typical   n=170    VAD V=0.749 A=0.554 D=0.503
+    atypical  n=153    VAD V=0.740 A=0.560 D=0.506
+    atypical-leaning affect words: quiet, fortune, ready, ridiculous, time, sweet, pop, guess, long, laughter
+
+  measure: audio
+    typical   n=298    VAD V=0.736 A=0.560 D=0.511
+    atypical  n=297    VAD V=0.740 A=0.499 D=0.451
+    atypical-leaning affect words: white, quiet, kiss, laughter, long, love, pretty, ridiculous, guess, good
+
+--- sad (n=1084) ---
+
+  measure: vad_theoretical
+    typical   n=542    VAD V=0.327 A=0.372 D=0.452
+    atypical  n=542    VAD V=0.300 A=0.410 D=0.462
+    atypical-leaning affect words: accident, rat, destroyed, war, alive, bank, show, drinking, selfish, love
+
+  measure: vad_class_mean
+    typical   n=552    VAD V=0.311 A=0.374 D=0.464
+    atypical  n=532    VAD V=0.316 A=0.408 D=0.450
+    atypical-leaning affect words: accident, rat, destroyed, war, alive, bank, show, drinking, love, money
+
+  measure: nrc
+    typical   n=261    VAD V=0.309 A=0.456 D=0.536
+    atypical  n=246    VAD V=0.298 A=0.410 D=0.504
+    atypical-leaning affect words: lost, selfish, happy, bad, sick, good, hope, ashamed, leave, enjoy
+
+  measure: audio
+    typical   n=542    VAD V=0.314 A=0.422 D=0.509
+    atypical  n=542    VAD V=0.312 A=0.360 D=0.405
+    atypical-leaning affect words: lost, baby, drinking, sick, hope, talk, leave, love, kind, guess
+
+--- angry (n=1103) ---
+
+  measure: vad_theoretical
+    typical   n=582    VAD V=0.205 A=0.728 D=0.777
+    atypical  n=521    VAD V=0.251 A=0.582 D=0.693
+    atypical-leaning affect words: marry, overbearing, brute, conceited, impossible, dear, torment, sting, amusing, invite
+
+  measure: vad_class_mean
+    typical   n=552    VAD V=0.218 A=0.661 D=0.761
+    atypical  n=551    VAD V=0.234 A=0.657 D=0.714
+    atypical-leaning affect words: overbearing, cruel, brute, conceited, impossible, fiend, torment, loathe, marry, finally
+
+  measure: nrc
+    typical   n=331    VAD V=0.196 A=0.712 D=0.784
+    atypical  n=308    VAD V=0.221 A=0.672 D=0.753
+    atypical-leaning affect words: sting, mad, crazy, inspire, shaking, inspired, bark, invite, fill, kiss
+
+  measure: audio
+    typical   n=552    VAD V=0.197 A=0.707 D=0.784
+    atypical  n=551    VAD V=0.256 A=0.611 D=0.690
+    atypical-leaning affect words: prove, quiet, crazy, inspired, sting, invite, brute, shaking, stupid, amusing

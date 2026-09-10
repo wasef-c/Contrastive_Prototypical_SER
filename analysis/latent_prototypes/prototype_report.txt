@@ -1,0 +1,96 @@
+Effective prototypes used per class (1.0 = no split, 4.0 = even usage)
+IEMO: neutral=2.01, happy=1.07, sad=1.00, angry=1.00
+MSPI: neutral=2.00, happy=1.05, sad=1.00, angry=1.03
+
+======================================================================
+IEMO
+======================================================================
+
+--- neutral (n=1708) ---
+  proto 0: n=0 (too few)
+  proto 1: n=1 (too few)
+  proto 2: n=848 (50%)  VAD V=0.491 A=0.436 D=0.470
+    terms: off, business, life, it'll, wasting, license, can't, don't, end, since
+      > Yeah.
+      > I guess, you know, everybody has to make sacrifices.
+  proto 3: n=859 (50%)  VAD V=0.495 A=0.427 D=0.446
+    terms: mmhmm, flashlight, putting, what's, annie, which, talk, anyhow, certainly, women
+      > Excuse me.
+      > Is there a problem?
+
+--- happy (n=595) ---
+  proto 0: n=0 (too few)
+  proto 1: n=8 (too few)
+  proto 2: n=0 (too few)
+  proto 3: n=587 (99%)  VAD V=0.739 A=0.532 D=0.482
+    terms: it's, laughter, i'm, mean, don't, we're, that's, good, out, look
+      > Well Vegas was awesome.
+      > And, um, I got married.
+
+--- sad (n=1084) ---
+  proto 0: n=1084 (100%)  VAD V=0.313 A=0.391 D=0.457
+    terms: it's, don't, mean, i'm, him, out, things, about, can't, some
+      > Did you get the mail? So you saw my letter?
+      > Yeah.  I know.
+  proto 1: n=0 (too few)
+  proto 2: n=0 (too few)
+  proto 3: n=0 (too few)
+
+--- angry (n=1103) ---
+  proto 0: n=0 (too few)
+  proto 1: n=0 (too few)
+  proto 2: n=0 (too few)
+  proto 3: n=1103 (100%)  VAD V=0.226 A=0.659 D=0.737
+    terms: don't, you're, it's, i'm, never, mean, about, because, again, business
+      > That's out of control.
+      > I don't understand why this is so complicated for people when they get here.  It's just a simple form.  I just
+
+======================================================================
+MSPI
+======================================================================
+
+--- neutral (n=3501) ---
+  proto 0: n=0 (too few)
+  proto 1: n=1 (too few)
+  proto 2: n=1767 (50%)  VAD V=0.489 A=0.711 D=0.470
+    terms: offer, skip, haven't, guys, deal, she's, class, i've, wouldn't, prod
+      > Yeah. I just rolled out of bed. I don't want to go to class today.
+      > Well, I appreciate that, but I can take care of myself. I mean, I know you were up late talking to your girlfr
+  proto 3: n=1733 (50%)  VAD V=0.482 A=0.719 D=0.459
+    terms: inquisitive, shows, than, preliminary, once, thought, kitten, joined, study, post
+      > I have to go to class. How can I not? Okay.
+      > ...going so far?It has been, I have been asleep not long enough.
+
+--- happy (n=2629) ---
+  proto 0: n=0 (too few)
+  proto 1: n=22 (1%)  VAD V=0.701 A=0.622 D=0.549
+    terms: insane, dog
+      > Let's not now.
+      > Well, are you going to take it.
+  proto 2: n=0 (too few)
+  proto 3: n=2607 (99%)  VAD V=0.764 A=0.516 D=0.603
+    terms: it's, i'm, inaudible, hey, that's, good, sorry, pudding, great, some
+      > Oh, I'm sorry. I'll sit on my hand.
+      > Yeah. It's insane. Like, man, you got so little sleep last night. I know that your girlfriend was having a pan
+
+--- sad (n=879) ---
+  proto 0: n=879 (100%)  VAD V=0.248 A=0.681 D=0.439
+    terms: i'm, it's, don't, sorry, been, mean, inaudible, can't, miss, hey
+      > [crosstalk 00:00:31] really tired.Oh, I'm so tired. I'm not looking forward to class this morning.Well, I mean
+      > Hey Alan.
+  proto 1: n=0 (too few)
+  proto 2: n=0 (too few)
+  proto 3: n=0 (too few)
+
+--- angry (n=789) ---
+  proto 0: n=3 (too few)
+  proto 1: n=0 (too few)
+  proto 2: n=0 (too few)
+  proto 3: n=786 (100%)  VAD V=0.245 A=0.439 D=0.640
+    terms: don't, that's, i'm, it's, can't, been, you're, rats, could, finished
+      > I can't skip class. What are you talking about?
+      > Well, I don't think it's really a big deal.No, it is a really big deal.
+
+
+Cross-corpus replication of prototype VAD profiles
+neutral: spread IEMO=0.010 MSPI=0.009 ordering_matches=False

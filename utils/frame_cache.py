@@ -40,6 +40,7 @@ def frame_cache_paths(
     dataset_name: str,
     model_name: str,
     num_frames: int,
+    row_filter: str = "",
 ) -> Tuple[Path, Path]:
     """Return the (features, metadata) paths for a frame cache.
 
@@ -52,7 +53,12 @@ def frame_cache_paths(
         (path to the .npy feature file, path to the .npz metadata file).
     """
     slug = model_name.replace("/", "__").replace(":", "_")
+    # row_filter distinguishes caches holding different SUBSETS of rows.
+    # Without it an arm that drops neutral overwrites the full-length
+    # cache, and the next full-length arm silently re-extracts everything.
     stem = f"{dataset_name}__{slug}__frames{num_frames}"
+    if row_filter:
+        stem = f"{stem}__{row_filter}"
     return (
         (FRAME_CACHE_DIR / f"{stem}.npy").resolve(),
         (FRAME_CACHE_DIR / f"{stem}__meta.npz").resolve(),
@@ -89,6 +95,7 @@ def write_frame_cache(
     model_name: str,
     num_frames: int,
     num_samples: int,
+    row_filter: str = "",
     feature_dim: int = 768,
 ) -> Tuple[np.memmap, Path, Path]:
     """Open a writable memmap for a new frame cache.
@@ -106,7 +113,8 @@ def write_frame_cache(
     Returns:
         (writable memmap of shape [N, T, D], feature path, meta path).
     """
-    feat_path, meta_path = frame_cache_paths(dataset_name, model_name, num_frames)
+    feat_path, meta_path = frame_cache_paths(dataset_name, model_name,
+                                            num_frames, row_filter)
     FRAME_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = feat_path.with_suffix(".npy.tmp")
     arr = np.lib.format.open_memmap(
@@ -157,6 +165,7 @@ def load_frame_cache(
     model_name: str,
     num_frames: int,
     expected_n: Optional[int] = None,
+    row_filter: str = "",
 ) -> Optional[Tuple[np.memmap, np.ndarray]]:
     """Open an existing frame cache read-only.
 
@@ -170,7 +179,8 @@ def load_frame_cache(
         (read-only memmap [N, T, D], durations [N]), or None when the cache
         is absent or the row count disagrees.
     """
-    feat_path, meta_path = frame_cache_paths(dataset_name, model_name, num_frames)
+    feat_path, meta_path = frame_cache_paths(dataset_name, model_name,
+                                            num_frames, row_filter)
     if not feat_path.exists() or not meta_path.exists():
         return None
     arr = np.load(feat_path, mmap_mode="r")

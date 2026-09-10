@@ -10,9 +10,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
-from datasets import load_dataset
+from datasets import concatenate_datasets, load_dataset
 from torch.utils.data import Dataset
 
+from utils.annotator_meta import SUBTYPE_NAMES, load_subtype_meta
 from utils.frame_cache import (
     finalize_frame_cache,
     load_frame_cache,
@@ -20,6 +21,7 @@ from utils.frame_cache import (
     write_frame_cache,
 )
 from utils.prototypicality import calculate_difficulty
+from utils.config import RAW_AUDIO_ENCODERS
 
 
 AUDIO_FEATURE_CACHE_DIR = Path(
@@ -33,7 +35,8 @@ AROUSAL_REVERSED_CORPORA = {"MSPI"}
 
 
 def _encoder_cache_path(dataset_name: str, encoder_type: str, model_name: str,
-                        pooling: str = "mean") -> Path:
+                        pooling: str = "mean",
+                        row_filter: str = "") -> Path:
     """Deterministic per-(dataset, encoder) cache filename.
 
     Args:
@@ -43,6 +46,13 @@ def _encoder_cache_path(dataset_name: str, encoder_type: str, model_name: str,
         pooling: temporal pooling mode. Part of the key because different
             modes produce different feature widths; without it a
             mean_std run would silently load stale 768-dim features.
+        row_filter: tag for anything that changes which ROWS are kept, e.g.
+            "noneutral". Part of the filename rather than only the lookup:
+            an arm that drops neutral writes a shorter cache, and if it lands
+            on the same path the next full-length arm finds a row-count
+            mismatch and silently re-extracts every feature. Keying the
+            lookup stops two arms sharing an object; only keying the path
+            stops them overwriting each other's file.
 
     Returns:
         Absolute Path under AUDIO_FEATURE_CACHE_DIR.
@@ -50,6 +60,8 @@ def _encoder_cache_path(dataset_name: str, encoder_type: str, model_name: str,
     model_slug = model_name.replace("/", "__").replace(":", "_")
     if pooling and pooling != "mean":
         model_slug = f"{model_slug}__{pooling}"
+    if row_filter:
+        model_slug = f"{model_slug}__{row_filter}"
     fname = f"{dataset_name}__{encoder_type}__{model_slug}.pt"
     return (AUDIO_FEATURE_CACHE_DIR / fname).resolve()
 
@@ -74,7 +86,19 @@ class EmotionDataset(Dataset):
         # "MSPP": "cairocode/MSPP_Audio_Text_Merged",
         # "CMUMOSEI": "cairocode/CMUMOSEI_Emotion2Vec_PrecomputedEncodings",
         # "SAMSEMO": "cairocode/SAMSEMO_Emotion2Vec_PrecomputedEncodings",
-        "MSPP": "cairocode/MSPP_WAV",
+        # MSPP_WAV_Filtered_ordered_v2 additionally carries overall_agreement
+        # and per-dimension annotator std. Its VAD values differ from
+        # MSPP_WAV (that revision averages annotators, this one does not), so
+        # the two revisions cannot be joined and results are not comparable
+        # across the switch.
+        # Local build of the official Nov-2024 release: raw audio, transcript,
+        # consensus labels for ALL ten classes, and the per-annotator
+        # statistics. Replaces MSPP_WAV_Filtered_ordered_v2, whose pool was
+        # skewed toward neutral (53.4% vs 45.3%) and away from the emotional
+        # classes (angry 10.0% vs 15.5%, sad 7.5% vs 10.7%) because it
+        # under-represented the official Development split, which is where
+        # 46% of the corpus's angry data lives.
+        "MSPP": "/mnt/fast/mspp_build",
         "CMUMOSEI": "cairocode/cmu_mosei_wav_2",
         "SAMSEMO": "cairocode/samsemo-audio",
     }
@@ -82,16 +106,20 @@ class EmotionDataset(Dataset):
     # Alternative HF paths for raw audio (wav2vec2/emotion2vec online encoder)
     # Used when the main DATASET_MAP entry lacks an 'audio' column
     AUDIO_DATASET_MAP = {
-        "MSPP": "cairocode/MSPP_WAV",
+        "MSPP": "/mnt/fast/mspp_build",
         "CMUMOSEI": "cairocode/cmu_mosei_wav_2",
         "SAMSEMO": "cairocode/samsemo-audio",
     }
 
-    # String emotion class → integer label (for datasets like MSPP_WAV without 'label' column)
+    # String emotion class -> integer label (for datasets like MSPP_WAV without 'label' column)
     EMOCLASS_TO_LABEL = {"N": 0, "H": 1, "S": 2, "A": 3}
 
     # Datasets that have VAD annotations (for regression and prototypicality)
     DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
+
+    # Corpora whose official train/validation splits are merged into one
+    # training pool. Only safe when the corpus is never used for evaluation.
+    MERGE_SPLIT_DATASETS = {"MSPP"}
 
     def __init__(self, dataset_name, split="train", config=None, task_type="classification"):
         """
@@ -117,15 +145,43 @@ class EmotionDataset(Dataset):
             raise ValueError(f"{dataset_name} has no VAD annotations - cannot use for regression")
 
         # Determine which HF dataset path to use
-        if self.audio_encoder_type in ("wav2vec2", "emotion2vec") and dataset_name in self.AUDIO_DATASET_MAP:
+        if self.audio_encoder_type in RAW_AUDIO_ENCODERS and dataset_name in self.AUDIO_DATASET_MAP:
             dataset_path = self.AUDIO_DATASET_MAP[dataset_name]
         elif dataset_name in self.DATASET_MAP:
             dataset_path = self.DATASET_MAP[dataset_name]
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}. Must be one of {list(self.DATASET_MAP.keys())}")
 
-        # Load dataset from HuggingFace
-        self.hf_dataset = load_dataset(dataset_path, split=split, trust_remote_code=True)
+        # Load dataset from HuggingFace (or a local build directory).
+        #
+        # MSP-Podcast ships Train and Development as separate splits, and the
+        # class balance differs sharply between them: angry is 26.6% of
+        # Development but only 11.4% of Train, so nearly half the corpus's
+        # angry data sits in Development. Training on Train alone would throw
+        # that away. Since every evaluation corpus here is external, holding
+        # out the official Development split buys nothing, so the two are
+        # merged and validation is carved from the pool by val_split.
+        merge_splits = bool(getattr(config, "mspp_merge_splits", True))
+        if (split == "train" and merge_splits
+                and dataset_name in self.MERGE_SPLIT_DATASETS):
+            parts = []
+            for sub in ("train", "validation"):
+                try:
+                    parts.append(load_dataset(dataset_path, split=sub,
+                                              trust_remote_code=True))
+                except Exception:
+                    continue
+            if not parts:
+                raise ValueError(
+                    f"{dataset_name}: no train/validation splits found at "
+                    f"{dataset_path}")
+            self.hf_dataset = (parts[0] if len(parts) == 1
+                               else concatenate_datasets(parts))
+            print(f"  Merged {len(parts)} splits for {dataset_name}: "
+                  f"{[len(p) for p in parts]} -> {len(self.hf_dataset)} rows")
+        else:
+            self.hf_dataset = load_dataset(dataset_path, split=split,
+                                           trust_remote_code=True)
 
         print(f"  Loaded {dataset_name}: {len(self.hf_dataset)} samples (encoder: {self.audio_encoder_type})")
         print(f"   Columns: {self.hf_dataset.column_names}")
@@ -134,7 +190,7 @@ class EmotionDataset(Dataset):
         # Raw waveforms are loaded lazily in __getitem__ to avoid loading
         # gigabytes of audio into RAM upfront.
         self.data = []
-        self.uses_raw_audio = self.audio_encoder_type in ("wav2vec2", "emotion2vec")
+        self.uses_raw_audio = self.audio_encoder_type in RAW_AUDIO_ENCODERS
         skipped_vad_count = 0
         skipped_label_count = 0
 
@@ -156,6 +212,27 @@ class EmotionDataset(Dataset):
         # Collapse to neutral vs emotional when the arm is a presence detector.
         binary_neutral = bool(getattr(config, "binary_neutral", False))
 
+        # Remove neutral entirely and renumber the emotional classes to
+        # 0..num_classes-1. This is the second stage of the hierarchical
+        # system, where a separate detector already owns the presence
+        # decision, so neutral is not a class the emotion model can predict.
+        # Distinct from binary_neutral, which keeps every sample and collapses
+        # the target; here the neutral rows are dropped from the split.
+        drop_neutral = bool(getattr(config, "drop_neutral", False))
+        if binary_neutral and drop_neutral:
+            raise ValueError(
+                "binary_neutral and drop_neutral are mutually exclusive: the "
+                "first collapses neutral into a target, the second removes it."
+            )
+        if drop_neutral and bool(getattr(config, "use_muted_mixup", False)):
+            # Muted mixup reads label 0 as neutral and blends toward it. After
+            # the drop, label 0 is happy, so it would silently blend every
+            # emotion toward happy instead of failing.
+            raise ValueError(
+                "use_muted_mixup requires neutral samples to blend toward, "
+                "but drop_neutral removes them."
+            )
+
         # VAD columns: support multiple naming conventions across corpora
         # (e.g. MSPI uses valence/arousal/domination, CMUMOSEI/SAMSEMO use
         # consensus_*, MSPP uses EmoVal/EmoAct/EmoDom).
@@ -174,6 +251,33 @@ class EmotionDataset(Dataset):
         all_transcripts = [None] * n
         if self.modality in ["text", "both"]:
             all_transcripts = first_col(["transcript", "text"], default="[EMPTY]")
+
+        # Per-annotator statistics from the local MSP-Podcast build, joined by
+        # audio filename. The training corpus predates the Nov 2024 release
+        # and carries roughly a third of rows the release withholds, so the
+        # join is partial by construction; unmatched rows get a zero mask and
+        # the auxiliary loss skips them rather than fitting a fabricated
+        # target. Coverage is even across classes (61 to 73 percent), so the
+        # masking does not bias the auxiliary signal toward one emotion.
+        subtype_meta = None
+        if getattr(config, "use_annotator_meta", False):
+            subtype_meta = load_subtype_meta()
+            if subtype_meta is None:
+                raise FileNotFoundError(
+                    "use_annotator_meta is set but the annotator cache is "
+                    "missing. Build it with "
+                    "utils.annotator_meta.build_subtype_cache()."
+                )
+        all_filenames = first_col(["FileName", "Utterance_ID", "file_name"],
+                                  default=None)
+        n_subtype = len(SUBTYPE_NAMES)
+        zero_subtype = np.zeros(n_subtype, dtype=np.float32)
+        zero_vad_std = np.zeros(3, dtype=np.float32)
+        # label_dist is 9 wide in the build: Neutral, Happy, Sad, Angry,
+        # Contempt, Surprise, Disgust, Fear, Other. The first four map onto
+        # this project's label space in the same order.
+        zero_label_dist = np.zeros(9, dtype=np.float32)
+        matched_meta = 0
 
         # Preextracted feature column is touched per-row (large nested structs);
         # only grab the whole column when actually needed.
@@ -267,6 +371,13 @@ class EmotionDataset(Dataset):
             out_label = label
             if binary_neutral:
                 out_label = 0 if label == 0 else 1
+            elif drop_neutral:
+                # Neutral rows leave the split; the rest shift down one so the
+                # head sees a contiguous 0..K-1 range. label4 below keeps the
+                # original numbering, so analysis can still map back.
+                if label == 0:
+                    continue
+                out_label = label - 1
 
             sample = {
                 "label": out_label,
@@ -282,6 +393,29 @@ class EmotionDataset(Dataset):
                             else f"{dataset_name}:row{i}"),
             }
 
+            if subtype_meta is not None:
+                fname = all_filenames[i]
+                key = (os.path.basename(str(fname)).rsplit(".", 1)[0]
+                       if fname is not None else None)
+                row = subtype_meta.row(key) if key is not None else None
+                if row is not None:
+                    sample["subtype_dist"] = subtype_meta.subtype_dist[row]
+                    sample["annot_vad_std"] = subtype_meta.vad_std[row]
+                    # Fraction of annotators voting the majority class. Used
+                    # to define class prototypes from the utterances people
+                    # agreed on rather than from every row equally.
+                    sample["annot_consensus"] = float(
+                        subtype_meta.label_dist[row].max())
+                    sample["label_dist"] = subtype_meta.label_dist[row]
+                    sample["annot_mask"] = 1.0
+                    matched_meta += 1
+                else:
+                    sample["subtype_dist"] = zero_subtype
+                    sample["annot_vad_std"] = zero_vad_std
+                    sample["annot_consensus"] = 0.0
+                    sample["label_dist"] = zero_label_dist
+                    sample["annot_mask"] = 0.0
+
             if self.uses_raw_audio:
                 # Lazy waveform load in __getitem__
                 sample["hf_idx"] = i
@@ -293,6 +427,14 @@ class EmotionDataset(Dataset):
             self.data.append(sample)
 
         print(f"  Loaded {len(self.data)} samples from {dataset_name}")
+        if subtype_meta is not None and matched_meta > 0:
+            # Only meaningful for the training corpus. The test corpora are
+            # not MSP-Podcast, so they match nothing by construction and
+            # reporting a zero there reads like a failed join rather than an
+            # expected one.
+            pct = 100.0 * matched_meta / max(len(self.data), 1)
+            print(f"   Annotator metadata joined on {matched_meta} rows "
+                  f"({pct:.1f}%); the rest are masked out of the aux loss")
         if skipped_vad_count > 0:
             print(f"   Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
         if skipped_label_count > 0:
@@ -414,13 +556,20 @@ class EmotionDataset(Dataset):
         n_frames = int(getattr(self.config, "num_frames", 32))
         n = len(self.data)
 
+        # Arms that filter rows (drop_neutral) must not share a cache file
+        # with full-length arms, or each overwrites the other and both
+        # re-extract on every alternation.
+        row_filter = ("noneutral"
+                      if bool(getattr(self.config, "drop_neutral", False))
+                      else "")
         existing = load_frame_cache(self.dataset_name, model_name, n_frames,
-                                    expected_n=n)
+                                    expected_n=n, row_filter=row_filter)
         if existing is None:
             print(f"  Extracting {n} frame-level features for "
                   f"{self.dataset_name} (T={n_frames})...")
             arr, tmp_path, meta_path = write_frame_cache(
                 self.dataset_name, model_name, n_frames, n,
+                row_filter=row_filter,
             )
             durations = np.zeros(n, dtype=np.int32)
 
@@ -495,6 +644,17 @@ class EmotionDataset(Dataset):
             # valid under a train/val split.
             "sample_index": idx,
         }
+
+        # Annotator statistics, present only when use_annotator_meta is set.
+        # Copied through explicitly because this dict is rebuilt per access
+        # rather than handed out from self.data, and the collate function
+        # decides what to batch from the keys of the first item it sees.
+        if "annot_mask" in item:
+            result["subtype_dist"] = item["subtype_dist"]
+            result["annot_vad_std"] = item["annot_vad_std"]
+            result["annot_consensus"] = item["annot_consensus"]
+            result["label_dist"] = item["label_dist"]
+            result["annot_mask"] = item["annot_mask"]
 
         # Frame-level: read one row from the memmap. Only this row is
         # paged in, so RAM stays flat regardless of corpus size.

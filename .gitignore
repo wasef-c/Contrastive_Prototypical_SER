@@ -1,11 +1,93 @@
+# ---------------------------------------------------------------------------
+# Large run artefacts. All regenerable. saved_models alone reached 641 GB and
+# .flash currently holds 41 GB; the disk filled on 2026-09-06 and silently
+# broke four training arms. See the disk hygiene section of
+# docs/QUEUE_STATUS.md.
+# ---------------------------------------------------------------------------
 saved_models/
-wandb/
-CLAUDE.md 
-__pycache__/
-*.pt
 checkpoints/
+wandb/
+.flash/
+cache/
+logs/
+*.pt
+*.pth
+*.ckpt
+
+# ---------------------------------------------------------------------------
+# analysis/ and scripts/ used to be ignored wholesale, which hid the table
+# generators, the figure scripts and the disk guard that the paper depends on.
+# The code is now tracked and only the DATA these scripts emit is ignored.
+# ---------------------------------------------------------------------------
+analysis/arms/
+analysis/baseline_errors/
+analysis/**/*.npz
+analysis/**/*.npy
+analysis/**/*.png
+analysis/**/*.pdf
+
+# Generated tables and figures under paper/ ARE tracked. They are small, the
+# paper needs them, and they are reproducible with
+#   python analysis/make_tables.py
+#   python analysis/fig_whitened_3d.py
+
+# ---------------------------------------------------------------------------
+# Scratch, backups, stray outputs.
+# ---------------------------------------------------------------------------
 motivation/
 *.csv
-scripts/
-analysis/
-.*
+*.bak
+*.pre_*
+*.orig
+uf.log
+
+# ---------------------------------------------------------------------------
+# Python, editors, OS.
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
+
+# Personal instructions file, not part of the codebase.
+CLAUDE.md
+
+# ---------------------------------------------------------------------------
+# Superseded experiment definitions and launchers. Months of exploratory
+# sweeps, almost all abandoned; keeping them adds 180 files of noise to every
+# diff. The exceptions are the two files current work depends on.
+# ---------------------------------------------------------------------------
+configs/*
+!configs/class_weight.yaml
+
+run_files/*
+!run_files/_template.sh
+
+# One-off analysis scripts from directions that were closed. The four kept are
+# live tooling: the disk guard and pruner (see the disk hygiene section of
+# docs/QUEUE_STATUS.md), the MSP-Podcast build, and the asset prefetcher.
+scripts/*
+!scripts/disk_guard.sh
+!scripts/prune_models.py
+!scripts/build_mspp_dataset.py
+!scripts/prefetch_assets.py
+
+# Figures are committed as PDF for LaTeX. The PNG copies exist only for
+# on-screen viewing and are four times the size.
+paper/figures/*.png
+
+# ---------------------------------------------------------------------------
+# Working notes. Handoff prompts, live worklists and design docs for closed
+# directions: useful on disk, not worth version history.
+#
+# RESULTS_LOG.md is the exception. Its 24 sections record measurements that
+# cannot be recovered by rerunning anything, for instance that roughly 29
+# percent of within-class VAD spread is annotator noise, and that resuming a
+# swa_last_n run silently falls back to best_val selection.
+# ---------------------------------------------------------------------------
+docs/*
+!docs/RESULTS_LOG.md
