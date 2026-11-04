@@ -1,0 +1,2793 @@
+{
+  "corpus": "mspp",
+  "labels": [
+    "Neutral",
+    "Happy",
+    "Sad",
+    "Angry",
+    "Contempt",
+    "Surprise",
+    "Disgust",
+    "Fear",
+    "Other"
+  ],
+  "args": {
+    "corpus": "mspp",
+    "anchors": 20000,
+    "per_anchor": 40,
+    "max_radius": 1.0,
+    "min_annotators": 5,
+    "min_agree": 0.6,
+    "seed": 42
+  },
+  "vad_dispersion_cuts": [
+    0.709706167380015,
+    0.9553892910480499
+  ],
+  "coincident_unanimous": {
+    "n_utterances": 4412,
+    "n_groups": 98,
+    "n_pairs": 554458,
+    "conflict_at_coincident_vad": 0.5042744445927374,
+    "same_population_baseline": 0.676955784479648,
+    "largest_groups": [
+      {
+        "vad": [
+          4.0,
+          4.0,
+          4.0
+        ],
+        "n": 401,
+        "labels": {
+          "Neutral": 236,
+          "Happy": 164,
+          "Sad": 1
+        }
+      },
+      {
+        "vad": [
+          4.0,
+          3.0,
+          3.0
+        ],
+        "n": 391,
+        "labels": {
+          "Neutral": 188,
+          "Happy": 191,
+          "Fear": 12
+        }
+      },
+      {
+        "vad": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "n": 375,
+        "labels": {
+          "Neutral": 199,
+          "Happy": 163,
+          "Sad": 2,
+          "Fear": 11
+        }
+      },
+      {
+        "vad": [
+          4.0,
+          3.0,
+          4.0
+        ],
+        "n": 373,
+        "labels": {
+          "Neutral": 202,
+          "Happy": 171
+        }
+      },
+      {
+        "vad": [
+          3.0,
+          4.0,
+          4.0
+        ],
+        "n": 372,
+        "labels": {
+          "Neutral": 199,
+          "Happy": 171,
+          "Sad": 1,
+          "Disgust": 1
+        }
+      },
+      {
+        "vad": [
+          3.0,
+          4.0,
+          3.0
+        ],
+        "n": 350,
+        "labels": {
+          "Neutral": 166,
+          "Happy": 179,
+          "Sad": 3,
+          "Disgust": 2
+        }
+      },
+      {
+        "vad": [
+          4.0,
+          4.0,
+          3.0
+        ],
+        "n": 330,
+        "labels": {
+          "Neutral": 179,
+          "Happy": 151
+        }
+      },
+      {
+        "vad": [
+          3.0,
+          3.0,
+          4.0
+        ],
+        "n": 327,
+        "labels": {
+          "Neutral": 155,
+          "Happy": 169,
+          "Sad": 1,
+          "Disgust": 2
+        }
+      },
+      {
+        "vad": [
+          6.0,
+          6.0,
+          5.0
+        ],
+        "n": 48,
+        "labels": {
+          "Happy": 27,
+          "Surprise": 21
+        }
+      },
+      {
+        "vad": [
+          6.0,
+          5.0,
+          5.0
+        ],
+        "n": 46,
+        "labels": {
+          "Happy": 26,
+          "Surprise": 20
+        }
+      }
+    ]
+  },
+  "all": {
+    "n_utterances": 116221,
+    "p_disagree_same_utterance": 0.6101766159675919,
+    "vad_se_in_sd_units": [
+      0.41111024823376807,
+      0.4397696429622891,
+      0.44330060317110415
+    ],
+    "n_matched_pairs": 799599,
+    "shells": [
+      {
+        "n_pairs": 4890,
+        "mean_true_vad_dist_sq": -0.5377887962061157,
+        "p_disagree_within": 0.3200573776537924,
+        "p_disagree_cross": 0.5984224426308988,
+        "p_disagree_cross_se": 0.005704265844628384,
+        "excess_direct": 0.27836506497710645,
+        "excess_direct_se": 0.005952461529906536,
+        "excess_analytic": 0.27836506497710645,
+        "excess_analytic_se": 0.0060035551202114725,
+        "excess_split_half": 0.27434629242139985,
+        "excess_split_half_se": 0.006521877676828189,
+        "radius_lo": 0.0,
+        "radius_hi": 0.1,
+        "excess_shuffled": 0.46257877251339324,
+        "excess_shuffled_sd": 0.004259997127718051,
+        "share_unexplained": 0.601767918282603
+      },
+      {
+        "n_pairs": 1581,
+        "mean_true_vad_dist_sq": -0.8674117806609789,
+        "p_disagree_within": 0.6133070774993954,
+        "p_disagree_cross": 0.7060829894314218,
+        "p_disagree_cross_se": 0.005089871306271606,
+        "excess_direct": 0.09277591193202642,
+        "excess_direct_se": 0.004780998506179497,
+        "excess_analytic": 0.09277591193202638,
+        "excess_analytic_se": 0.004778240818898737,
+        "excess_split_half": 0.08896981521360653,
+        "excess_split_half_se": 0.006113074424505784,
+        "radius_lo": 0.1,
+        "radius_hi": 0.2,
+        "excess_shuffled": 0.22018641367767638,
+        "excess_shuffled_sd": 0.0038770117916254207,
+        "share_unexplained": 0.4213516646301257
+      },
+      {
+        "n_pairs": 23987,
+        "mean_true_vad_dist_sq": -1.0462755270199837,
+        "p_disagree_within": 0.6195868289797575,
+        "p_disagree_cross": 0.7057436491042542,
+        "p_disagree_cross_se": 0.0013663105795759024,
+        "excess_direct": 0.0861568201244968,
+        "excess_direct_se": 0.0012417523165229882,
+        "excess_analytic": 0.0861568201244968,
+        "excess_analytic_se": 0.001177448286171612,
+        "excess_split_half": 0.08644798558618264,
+        "excess_split_half_se": 0.0017568759241420044,
+        "radius_lo": 0.2,
+        "radius_hi": 0.3,
+        "excess_shuffled": 0.19569057287157626,
+        "excess_shuffled_sd": 0.000985347807378762,
+        "share_unexplained": 0.44027067252257474
+      },
+      {
+        "n_pairs": 90328,
+        "mean_true_vad_dist_sq": -0.9312462214305237,
+        "p_disagree_within": 0.6194785534410249,
+        "p_disagree_cross": 0.7099121566740269,
+        "p_disagree_cross_se": 0.0006819499445460085,
+        "excess_direct": 0.0904336032330021,
+        "excess_direct_se": 0.0006775246147800292,
+        "excess_analytic": 0.09043360323300208,
+        "excess_analytic_se": 0.0006514526176262104,
+        "excess_split_half": 0.09030718161589955,
+        "excess_split_half_se": 0.001061725316914198,
+        "radius_lo": 0.3,
+        "radius_hi": 0.5,
+        "excess_shuffled": 0.19639223384411258,
+        "excess_shuffled_sd": 0.0005354314055980024,
+        "share_unexplained": 0.46047443660518816
+      },
+      {
+        "n_pairs": 253273,
+        "mean_true_vad_dist_sq": -0.7144156627107441,
+        "p_disagree_within": 0.6197999521964037,
+        "p_disagree_cross": 0.719413235660337,
+        "p_disagree_cross_se": 0.0004304273864616148,
+        "excess_direct": 0.0996132834639332,
+        "excess_direct_se": 0.0004073019455234783,
+        "excess_analytic": 0.09961328346393318,
+        "excess_analytic_se": 0.0003824037438416071,
+        "excess_split_half": 0.10021911359502238,
+        "excess_split_half_se": 0.0005876892777399585,
+        "radius_lo": 0.5,
+        "radius_hi": 0.75,
+        "excess_shuffled": 0.1948720637253276,
+        "excess_shuffled_sd": 0.0003211707382852958,
+        "share_unexplained": 0.5111727230658276
+      },
+      {
+        "n_pairs": 425540,
+        "mean_true_vad_dist_sq": -0.3511431252860179,
+        "p_disagree_within": 0.6175304318803602,
+        "p_disagree_cross": 0.7304480614263783,
+        "p_disagree_cross_se": 0.00031677942645158547,
+        "excess_direct": 0.11291762954601842,
+        "excess_direct_se": 0.00032896424184350486,
+        "excess_analytic": 0.11291762954601839,
+        "excess_analytic_se": 0.0003084861289758455,
+        "excess_split_half": 0.11323155651994506,
+        "excess_split_half_se": 0.00045537793657072584,
+        "radius_lo": 0.75,
+        "radius_hi": 1.0,
+        "excess_shuffled": 0.19667600522826217,
+        "excess_shuffled_sd": 0.0002596614332378045,
+        "share_unexplained": 0.574130176250866
+      }
+    ],
+    "label_pairs": [
+      {
+        "a": "Neutral",
+        "b": "Happy",
+        "excess": 0.08435910579340711,
+        "mass": 0.15626899287180895,
+        "real_share": 0.5398326580539802
+      },
+      {
+        "a": "Happy",
+        "b": "Surprise",
+        "excess": 0.08193056858635205,
+        "mass": 0.09946786470245339,
+        "real_share": 0.823688824842454
+      },
+      {
+        "a": "Neutral",
+        "b": "Sad",
+        "excess": 0.03215640265649098,
+        "mass": 0.087249523473692,
+        "real_share": 0.3685567711574605
+      },
+      {
+        "a": "Neutral",
+        "b": "Fear",
+        "excess": 0.009367422819875928,
+        "mass": 0.019576262523432045,
+        "real_share": 0.47850925623128915
+      },
+      {
+        "a": "Sad",
+        "b": "Fear",
+        "excess": 0.001984287937247171,
+        "mass": 0.0066775715763445825,
+        "real_share": 0.2971571198542516
+      },
+      {
+        "a": "Happy",
+        "b": "Fear",
+        "excess": 0.0009115734110299268,
+        "mass": 0.007012939292886575,
+        "real_share": 0.1299845005010327
+      },
+      {
+        "a": "Angry",
+        "b": "Disgust",
+        "excess": 0.00018503044520087279,
+        "mass": 0.0054058518948328065,
+        "real_share": 0.034227805126835695
+      },
+      {
+        "a": "Fear",
+        "b": "Other",
+        "excess": -0.0004322222919989156,
+        "mass": 0.0014235415202480109,
+        "real_share": null
+      },
+      {
+        "a": "Angry",
+        "b": "Fear",
+        "excess": -0.00046548236831413757,
+        "mass": 0.002482821821859601,
+        "real_share": -0.1874811813783308
+      },
+      {
+        "a": "Sad",
+        "b": "Disgust",
+        "excess": -0.0005840876116811806,
+        "mass": 0.002640731827041159,
+        "real_share": -0.22118399365664815
+      },
+      {
+        "a": "Disgust",
+        "b": "Other",
+        "excess": -0.0007426783444063416,
+        "mass": 0.001558656375766776,
+        "real_share": null
+      },
+      {
+        "a": "Neutral",
+        "b": "Disgust",
+        "excess": -0.0008215302499327629,
+        "mass": 0.008795707923371865,
+        "real_share": -0.09340126537737811
+      }
+    ],
+    "regions": [
+      {
+        "cell": "lo-V lo-A lo-D",
+        "n_pairs": 1288,
+        "p_disagree_within": 0.20900633183241876,
+        "excess": 0.3759200763005111,
+        "top_labels": [
+          "Neutral",
+          "Sad",
+          "Happy"
+        ]
+      },
+      {
+        "cell": "hi-V lo-A lo-D",
+        "n_pairs": 1008,
+        "p_disagree_within": 0.24512096012445145,
+        "excess": 0.32570189635629976,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Sad"
+        ]
+      },
+      {
+        "cell": "hi-V hi-A hi-D",
+        "n_pairs": 1460,
+        "p_disagree_within": 0.2825027014232451,
+        "excess": 0.3192186927474054,
+        "top_labels": [
+          "Happy",
+          "Surprise",
+          "Neutral"
+        ]
+      },
+      {
+        "cell": "lo-V hi-A hi-D",
+        "n_pairs": 635,
+        "p_disagree_within": 0.5081660018836709,
+        "excess": 0.06605202845290854,
+        "top_labels": [
+          "Angry",
+          "Neutral",
+          "Contempt"
+        ]
+      }
+    ],
+    "examples": [
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2324_0206",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2420_0025",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2336_0720",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2395_0432",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2348_0331",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2336_0208",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2336_1221",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2336_0470",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2352_1113",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2324_0206",
+        "key_b": "MSP-PODCAST_2387_0001",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2419_0383",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0432",
+        "key_b": "MSP-PODCAST_2351_0323",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          6.0,
+          5.0,
+          7.0
+        ],
+        "vad_b": [
+          6.0,
+          5.0,
+          7.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2394_0403",
+        "key_b": "MSP-PODCAST_2395_0307",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          4.0,
+          4.0
+        ],
+        "vad_b": [
+          4.0,
+          4.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2346_0420",
+        "key_b": "MSP-PODCAST_2400_0322",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "vad_b": [
+          3.0,
+          3.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2347_0669",
+        "key_b": "MSP-PODCAST_2394_0046",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          4.0,
+          3.0
+        ],
+        "vad_b": [
+          3.0,
+          4.0,
+          3.0
+        ]
+      }
+    ],
+    "subtype_profiles": [
+      {
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "n_pairs": 451,
+        "subtype_gaps": [
+          {
+            "subtype": "Happy",
+            "mean_a": 0.275,
+            "mean_b": 0.641
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.006,
+            "mean_b": 0.244
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.46,
+            "mean_b": 0.241
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.183,
+            "mean_b": 0.001
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.004,
+            "mean_b": 0.125
+          }
+        ]
+      },
+      {
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "n_pairs": 419,
+        "subtype_gaps": [
+          {
+            "subtype": "Excited",
+            "mean_a": 0.244,
+            "mean_b": 0.487
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.241,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Surprise",
+            "mean_a": 0.117,
+            "mean_b": 0.27
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.125,
+            "mean_b": 0.231
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.641,
+            "mean_b": 0.727
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "n_pairs": 218,
+        "subtype_gaps": [
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.183,
+            "mean_b": 0.518
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.275,
+            "mean_b": 0.004
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.46,
+            "mean_b": 0.482
+          },
+          {
+            "subtype": "Depressed",
+            "mean_a": 0.001,
+            "mean_b": 0.018
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.545,
+            "mean_b": 0.529
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Fear",
+        "n_pairs": 46,
+        "subtype_gaps": [
+          {
+            "subtype": "Fear",
+            "mean_a": 0.0,
+            "mean_b": 0.583
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.46,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.012,
+            "mean_b": 0.417
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.275,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.183,
+            "mean_b": 0.003
+          }
+        ]
+      }
+    ]
+  },
+  "clear (low VAD dispersion)": {
+    "n_utterances": 39147,
+    "p_disagree_same_utterance": 0.4649927554646657,
+    "vad_se_in_sd_units": [
+      0.23719450104162992,
+      0.2546310628811097,
+      0.2358008812684419
+    ],
+    "n_matched_pairs": 799402,
+    "shells": [
+      {
+        "n_pairs": 9990,
+        "mean_true_vad_dist_sq": -0.08381341664824332,
+        "p_disagree_within": 0.14790214497515838,
+        "p_disagree_cross": 0.5175126319722696,
+        "p_disagree_cross_se": 0.004335391577881996,
+        "excess_direct": 0.36961048699711124,
+        "excess_direct_se": 0.0045262052502442075,
+        "excess_analytic": 0.36961048699711124,
+        "excess_analytic_se": 0.004314733817169951,
+        "excess_split_half": 0.37036083985692675,
+        "excess_split_half_se": 0.004600088486517008,
+        "radius_lo": 0.0,
+        "radius_hi": 0.1,
+        "excess_shuffled": 0.5661352390298569,
+        "excess_shuffled_sd": 0.004112638349778473,
+        "share_unexplained": 0.6528660671794336
+      },
+      {
+        "n_pairs": 9159,
+        "mean_true_vad_dist_sq": -0.3322671169307688,
+        "p_disagree_within": 0.4844455380802667,
+        "p_disagree_cross": 0.586322030294719,
+        "p_disagree_cross_se": 0.0029333940753811555,
+        "excess_direct": 0.10187649221445239,
+        "excess_direct_se": 0.002427929138799725,
+        "excess_analytic": 0.10187649221445237,
+        "excess_analytic_se": 0.002395511396322061,
+        "excess_split_half": 0.10279566523011853,
+        "excess_split_half_se": 0.0032554970882641408,
+        "radius_lo": 0.1,
+        "radius_hi": 0.2,
+        "excess_shuffled": 0.30503528442356903,
+        "excess_shuffled_sd": 0.0023394043676015904,
+        "share_unexplained": 0.33398264862037297
+      },
+      {
+        "n_pairs": 29593,
+        "mean_true_vad_dist_sq": -0.2969724888023874,
+        "p_disagree_within": 0.48446872947328895,
+        "p_disagree_cross": 0.5857015897575378,
+        "p_disagree_cross_se": 0.001641002021114698,
+        "excess_direct": 0.10123286028424894,
+        "excess_direct_se": 0.0013131420137428198,
+        "excess_analytic": 0.10123286028424892,
+        "excess_analytic_se": 0.0012942079199444053,
+        "excess_split_half": 0.10037543568583175,
+        "excess_split_half_se": 0.001856881896870369,
+        "radius_lo": 0.2,
+        "radius_hi": 0.3,
+        "excess_shuffled": 0.30439819642860044,
+        "excess_shuffled_sd": 0.0011401596671609302,
+        "share_unexplained": 0.33256721449725835
+      },
+      {
+        "n_pairs": 112784,
+        "mean_true_vad_dist_sq": -0.18684423502990144,
+        "p_disagree_within": 0.4911856200323776,
+        "p_disagree_cross": 0.6032567640589973,
+        "p_disagree_cross_se": 0.0008179525363843757,
+        "excess_direct": 0.11207114402661976,
+        "excess_direct_se": 0.0006676060169580602,
+        "excess_analytic": 0.11207114402661976,
+        "excess_analytic_se": 0.0006689393732507419,
+        "excess_split_half": 0.11097565464234434,
+        "excess_split_half_se": 0.0009542089163088081,
+        "radius_lo": 0.3,
+        "radius_hi": 0.5,
+        "excess_shuffled": 0.297554278591641,
+        "excess_shuffled_sd": 0.0006857820158883296,
+        "share_unexplained": 0.3766410100270294
+      },
+      {
+        "n_pairs": 247766,
+        "mean_true_vad_dist_sq": 0.0542045942860781,
+        "p_disagree_within": 0.48902977218598903,
+        "p_disagree_cross": 0.6280667867892844,
+        "p_disagree_cross_se": 0.0005049306632985573,
+        "excess_direct": 0.13903701460329523,
+        "excess_direct_se": 0.00047423102041001394,
+        "excess_analytic": 0.13903701460329523,
+        "excess_analytic_se": 0.0004410984354468566,
+        "excess_split_half": 0.13837607646033037,
+        "excess_split_half_se": 0.0006839938756168819,
+        "radius_lo": 0.5,
+        "radius_hi": 0.75,
+        "excess_shuffled": 0.29566419101513464,
+        "excess_shuffled_sd": 0.00046752329547416837,
+        "share_unexplained": 0.4702531413287655
+      },
+      {
+        "n_pairs": 390110,
+        "mean_true_vad_dist_sq": 0.44061089645078855,
+        "p_disagree_within": 0.46315209998617207,
+        "p_disagree_cross": 0.6542203665707669,
+        "p_disagree_cross_se": 0.0004208881129789786,
+        "excess_direct": 0.19106826658459464,
+        "excess_direct_se": 0.00044640220087966315,
+        "excess_analytic": 0.19106826658459455,
+        "excess_analytic_se": 0.00045636102950874567,
+        "excess_split_half": 0.19001991364523074,
+        "excess_split_half_se": 0.0005784520239704647,
+        "radius_lo": 0.75,
+        "radius_hi": 1.0,
+        "excess_shuffled": 0.31551565886115185,
+        "excess_shuffled_sd": 0.000409798708985146,
+        "share_unexplained": 0.6055745926343312
+      }
+    ],
+    "label_pairs": [
+      {
+        "a": "Neutral",
+        "b": "Happy",
+        "excess": 0.2048563699288625,
+        "mass": 0.2566962887485763,
+        "real_share": 0.79804959755188
+      },
+      {
+        "a": "Happy",
+        "b": "Surprise",
+        "excess": 0.058695226350452996,
+        "mass": 0.06891942657193201,
+        "real_share": 0.8516499522698743
+      },
+      {
+        "a": "Neutral",
+        "b": "Sad",
+        "excess": 0.02287589859576495,
+        "mass": 0.058917761584428255,
+        "real_share": 0.38826829092928344
+      },
+      {
+        "a": "Neutral",
+        "b": "Fear",
+        "excess": 0.013141813323368152,
+        "mass": 0.016843626899182458,
+        "real_share": 0.7802246750078523
+      },
+      {
+        "a": "Sad",
+        "b": "Fear",
+        "excess": 0.00472395173577389,
+        "mass": 0.006148892482225816,
+        "real_share": 0.7682605850450459
+      },
+      {
+        "a": "Happy",
+        "b": "Fear",
+        "excess": 0.003643219349250361,
+        "mass": 0.004708902431124653,
+        "real_share": 0.7736875848540847
+      },
+      {
+        "a": "Happy",
+        "b": "Sad",
+        "excess": 0.0024358411354042323,
+        "mass": 0.01606272939606273,
+        "real_share": 0.15164553142514509
+      },
+      {
+        "a": "Happy",
+        "b": "Disgust",
+        "excess": 0.00015893211018966325,
+        "mass": 0.0015839083061305287,
+        "real_share": null
+      },
+      {
+        "a": "Neutral",
+        "b": "Disgust",
+        "excess": -0.00033437328891680693,
+        "mass": 0.003193839946563258,
+        "real_share": -0.10469318892344948
+      },
+      {
+        "a": "Disgust",
+        "b": "Fear",
+        "excess": -0.00034950139183254753,
+        "mass": 8.024691358024692e-05,
+        "real_share": null
+      },
+      {
+        "a": "Sad",
+        "b": "Disgust",
+        "excess": -0.00038300374409343783,
+        "mass": 0.0006193092859759528,
+        "real_share": null
+      },
+      {
+        "a": "Contempt",
+        "b": "Fear",
+        "excess": -0.0003880422772512931,
+        "mass": 0.00022533644755866984,
+        "real_share": null
+      }
+    ],
+    "regions": [
+      {
+        "cell": "lo-V lo-A lo-D",
+        "n_pairs": 3429,
+        "p_disagree_within": 0.06014873140857392,
+        "excess": 0.472482745212404,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Sad"
+        ]
+      },
+      {
+        "cell": "hi-V lo-A lo-D",
+        "n_pairs": 3031,
+        "p_disagree_within": 0.10055537226437919,
+        "excess": 0.42571318596722757,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Sad"
+        ]
+      },
+      {
+        "cell": "hi-V hi-A hi-D",
+        "n_pairs": 1844,
+        "p_disagree_within": 0.15185623288851563,
+        "excess": 0.35868481829962634,
+        "top_labels": [
+          "Happy",
+          "Surprise",
+          "Neutral"
+        ]
+      },
+      {
+        "cell": "hi-V hi-A lo-D",
+        "n_pairs": 258,
+        "p_disagree_within": 0.5228897502153316,
+        "excess": 0.12183893195521109,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Angry"
+        ]
+      },
+      {
+        "cell": "lo-V hi-A hi-D",
+        "n_pairs": 1150,
+        "p_disagree_within": 0.3609941949735999,
+        "excess": 0.06236451339151572,
+        "top_labels": [
+          "Angry",
+          "Neutral",
+          "Contempt"
+        ]
+      }
+    ],
+    "examples": [
+      {
+        "key_a": "MSP-PODCAST_2400_0384",
+        "key_b": "MSP-PODCAST_2350_0448",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.0,
+          7.0,
+          5.0
+        ],
+        "vad_b": [
+          5.0,
+          7.0,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2352_0870",
+        "key_b": "MSP-PODCAST_2394_0143",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          4.0,
+          3.0
+        ],
+        "vad_b": [
+          3.0,
+          4.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2319_0628",
+        "key_b": "MSP-PODCAST_2347_0786",
+        "label_a": "Happy",
+        "label_b": "Fear",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "vad_b": [
+          3.0,
+          3.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2347_0571",
+        "key_b": "MSP-PODCAST_2397_0216",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          3.0,
+          4.0
+        ],
+        "vad_b": [
+          4.0,
+          3.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2420_0911",
+        "key_b": "MSP-PODCAST_2393_0275",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          4.0,
+          3.0
+        ],
+        "vad_b": [
+          4.0,
+          4.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2395_0491",
+        "key_b": "MSP-PODCAST_2392_0430",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          4.0,
+          4.0
+        ],
+        "vad_b": [
+          3.0,
+          4.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2351_0655",
+        "key_b": "MSP-PODCAST_2394_0455",
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.0,
+          7.0,
+          5.0
+        ],
+        "vad_b": [
+          5.0,
+          7.0,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0103_0597_0001",
+        "key_b": "MSP-PODCAST_2394_0399",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          4.0,
+          4.0
+        ],
+        "vad_b": [
+          4.0,
+          4.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2346_0744",
+        "key_b": "MSP-PODCAST_2394_0006",
+        "label_a": "Fear",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          3.0,
+          3.0
+        ],
+        "vad_b": [
+          4.0,
+          3.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2346_0744",
+        "key_b": "MSP-PODCAST_2394_0312",
+        "label_a": "Fear",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          3.0,
+          3.0
+        ],
+        "vad_b": [
+          4.0,
+          3.0,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2394_0536",
+        "key_b": "MSP-PODCAST_2395_0216",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          3.0,
+          4.0
+        ],
+        "vad_b": [
+          3.0,
+          3.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2394_0536",
+        "key_b": "MSP-PODCAST_2392_0564",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          3.0,
+          4.0
+        ],
+        "vad_b": [
+          3.0,
+          3.0,
+          4.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2400_0384",
+        "key_b": "MSP-PODCAST_2394_0287",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.0,
+          7.0,
+          5.0
+        ],
+        "vad_b": [
+          5.0,
+          7.0,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2400_0384",
+        "key_b": "MSP-PODCAST_2397_0157",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.0,
+          7.0,
+          5.0
+        ],
+        "vad_b": [
+          5.0,
+          7.0,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2352_0870",
+        "key_b": "MSP-PODCAST_2347_0576",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.0,
+          4.0,
+          3.0
+        ],
+        "vad_b": [
+          3.0,
+          4.0,
+          3.0
+        ]
+      }
+    ],
+    "subtype_profiles": [
+      {
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "n_pairs": 2163,
+        "subtype_gaps": [
+          {
+            "subtype": "Happy",
+            "mean_a": 0.376,
+            "mean_b": 0.563
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.004,
+            "mean_b": 0.109
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.463,
+            "mean_b": 0.383
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.077,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.002,
+            "mean_b": 0.057
+          }
+        ]
+      },
+      {
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "n_pairs": 630,
+        "subtype_gaps": [
+          {
+            "subtype": "Sad",
+            "mean_a": 0.383,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.109,
+            "mean_b": 0.48
+          },
+          {
+            "subtype": "Surprise",
+            "mean_a": 0.054,
+            "mean_b": 0.263
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.057,
+            "mean_b": 0.245
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.563,
+            "mean_b": 0.735
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "n_pairs": 317,
+        "subtype_gaps": [
+          {
+            "subtype": "Happy",
+            "mean_a": 0.376,
+            "mean_b": 0.03
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.077,
+            "mean_b": 0.411
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.463,
+            "mean_b": 0.574
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.544,
+            "mean_b": 0.486
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.01,
+            "mean_b": 0.023
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Fear",
+        "n_pairs": 138,
+        "subtype_gaps": [
+          {
+            "subtype": "Fear",
+            "mean_a": 0.0,
+            "mean_b": 0.573
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.463,
+            "mean_b": 0.001
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.01,
+            "mean_b": 0.426
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.376,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.544,
+            "mean_b": 0.417
+          }
+        ]
+      }
+    ]
+  },
+  "middle": {
+    "n_utterances": 38479,
+    "p_disagree_same_utterance": 0.6555299962957108,
+    "vad_se_in_sd_units": [
+      0.42504649649722603,
+      0.44225249049193316,
+      0.46414996900657385
+    ],
+    "n_matched_pairs": 799349,
+    "shells": [
+      {
+        "n_pairs": 2654,
+        "mean_true_vad_dist_sq": -1.2142237260802438,
+        "p_disagree_within": 0.666135623878624,
+        "p_disagree_cross": 0.7163175055311425,
+        "p_disagree_cross_se": 0.0038367051069535495,
+        "excess_direct": 0.05018188165251843,
+        "excess_direct_se": 0.0033742855738059393,
+        "excess_analytic": 0.05018188165251841,
+        "excess_analytic_se": 0.0032538485440826723,
+        "excess_split_half": 0.04084604604178047,
+        "excess_split_half_se": 0.005108706412637371,
+        "radius_lo": 0.0,
+        "radius_hi": 0.1,
+        "excess_shuffled": 0.1453864026230574,
+        "excess_shuffled_sd": 0.0020084520084827583,
+        "share_unexplained": 0.3451621385985094
+      },
+      {
+        "n_pairs": 1617,
+        "mean_true_vad_dist_sq": -0.8795534508187726,
+        "p_disagree_within": 0.6249749860828049,
+        "p_disagree_cross": 0.6857896635662071,
+        "p_disagree_cross_se": 0.005366061717492836,
+        "excess_direct": 0.06081467748340224,
+        "excess_direct_se": 0.0035319244186655108,
+        "excess_analytic": 0.06081467748340223,
+        "excess_analytic_se": 0.003566441408317641,
+        "excess_split_half": 0.05747505534511729,
+        "excess_split_half_se": 0.0054115467139546,
+        "radius_lo": 0.1,
+        "radius_hi": 0.2,
+        "excess_shuffled": 0.19537562242625642,
+        "excess_shuffled_sd": 0.004704659568874722,
+        "share_unexplained": 0.3112705501749915
+      },
+      {
+        "n_pairs": 18206,
+        "mean_true_vad_dist_sq": -1.1022162664153703,
+        "p_disagree_within": 0.6594560917599479,
+        "p_disagree_cross": 0.7148432028398973,
+        "p_disagree_cross_se": 0.001456088441831823,
+        "excess_direct": 0.05538711107994948,
+        "excess_direct_se": 0.0011298142298236844,
+        "excess_analytic": 0.05538711107994946,
+        "excess_analytic_se": 0.0012378565401733415,
+        "excess_split_half": 0.05477927381077686,
+        "excess_split_half_se": 0.001961189343456852,
+        "radius_lo": 0.2,
+        "radius_hi": 0.3,
+        "excess_shuffled": 0.1564004820882084,
+        "excess_shuffled_sd": 0.0009150919878321527,
+        "share_unexplained": 0.3541364472822512
+      },
+      {
+        "n_pairs": 92685,
+        "mean_true_vad_dist_sq": -1.0008750411286427,
+        "p_disagree_within": 0.659456409328555,
+        "p_disagree_cross": 0.7172431533226176,
+        "p_disagree_cross_se": 0.0006177409049051556,
+        "excess_direct": 0.05778674399406254,
+        "excess_direct_se": 0.0005177079452424097,
+        "excess_analytic": 0.05778674399406252,
+        "excess_analytic_se": 0.0005094908335685391,
+        "excess_split_half": 0.057926074954898744,
+        "excess_split_half_se": 0.0009091997033500557,
+        "radius_lo": 0.3,
+        "radius_hi": 0.5,
+        "excess_shuffled": 0.15537653168668702,
+        "excess_shuffled_sd": 0.0004907261086209985,
+        "share_unexplained": 0.37191423548176566
+      },
+      {
+        "n_pairs": 284580,
+        "mean_true_vad_dist_sq": -0.7594615122658921,
+        "p_disagree_within": 0.6606011116790097,
+        "p_disagree_cross": 0.723977314733215,
+        "p_disagree_cross_se": 0.0003448191401332645,
+        "excess_direct": 0.06337620305420555,
+        "excess_direct_se": 0.0002911883923711288,
+        "excess_analytic": 0.06337620305420552,
+        "excess_analytic_se": 0.0003160143134883174,
+        "excess_split_half": 0.06331924592297342,
+        "excess_split_half_se": 0.0005403295673543875,
+        "radius_lo": 0.5,
+        "radius_hi": 0.75,
+        "excess_shuffled": 0.15296896876808164,
+        "excess_shuffled_sd": 0.00029521479662435803,
+        "share_unexplained": 0.41430757861936746
+      },
+      {
+        "n_pairs": 399607,
+        "mean_true_vad_dist_sq": -0.37902969103901724,
+        "p_disagree_within": 0.6585602325609896,
+        "p_disagree_cross": 0.7323764659287383,
+        "p_disagree_cross_se": 0.0002783543058743336,
+        "excess_direct": 0.0738162333677488,
+        "excess_direct_se": 0.00028463961388129036,
+        "excess_analytic": 0.07381623336774877,
+        "excess_analytic_se": 0.00028619682461794,
+        "excess_split_half": 0.07334543356872451,
+        "excess_split_half_se": 0.0004734612105768045,
+        "radius_lo": 0.75,
+        "radius_hi": 1.0,
+        "excess_shuffled": 0.15620339202846995,
+        "excess_shuffled_sd": 0.0001954512842289916,
+        "share_unexplained": 0.47256485540528403
+      }
+    ],
+    "label_pairs": [
+      {
+        "a": "Neutral",
+        "b": "Happy",
+        "excess": 0.014191106233794284,
+        "mass": 0.11826624096709727,
+        "real_share": 0.11999287470160126
+      },
+      {
+        "a": "Neutral",
+        "b": "Surprise",
+        "excess": 0.0075857295122044345,
+        "mass": 0.037985469152940696,
+        "real_share": 0.19970082458800367
+      },
+      {
+        "a": "Happy",
+        "b": "Surprise",
+        "excess": 0.005022959399193099,
+        "mass": 0.032118936744019284,
+        "real_share": 0.15638622907180763
+      },
+      {
+        "a": "Angry",
+        "b": "Contempt",
+        "excess": 0.004031556264955272,
+        "mass": 0.021535044700297705,
+        "real_share": 0.18720909666370641
+      },
+      {
+        "a": "Angry",
+        "b": "Disgust",
+        "excess": 0.0035552820554970157,
+        "mass": 0.010581148832006308,
+        "real_share": 0.336001516654113
+      },
+      {
+        "a": "Sad",
+        "b": "Contempt",
+        "excess": 0.0034473201606458614,
+        "mass": 0.014975403062282268,
+        "real_share": 0.230198823117385
+      },
+      {
+        "a": "Neutral",
+        "b": "Contempt",
+        "excess": 0.0031944063706404735,
+        "mass": 0.04344448895415362,
+        "real_share": 0.07352846005419668
+      },
+      {
+        "a": "Neutral",
+        "b": "Fear",
+        "excess": 0.003168036101119884,
+        "mass": 0.016887753919933867,
+        "real_share": 0.18759369162647593
+      },
+      {
+        "a": "Neutral",
+        "b": "Sad",
+        "excess": 0.002921935309726356,
+        "mass": 0.08344929068789718,
+        "real_share": 0.03501450144920321
+      },
+      {
+        "a": "Angry",
+        "b": "Surprise",
+        "excess": 0.00282125753712395,
+        "mass": 0.01265201982388903,
+        "real_share": 0.22298870665670048
+      },
+      {
+        "a": "Angry",
+        "b": "Other",
+        "excess": 0.0027396426834422373,
+        "mass": 0.014283164411004625,
+        "real_share": 0.1918092241052304
+      },
+      {
+        "a": "Neutral",
+        "b": "Angry",
+        "excess": 0.0027287435303631202,
+        "mass": 0.04125363139661248,
+        "real_share": 0.06614553526522249
+      }
+    ],
+    "regions": [
+      {
+        "cell": "lo-V hi-A hi-D",
+        "n_pairs": 438,
+        "p_disagree_within": 0.7050785456244233,
+        "excess": 0.06905995850562525,
+        "top_labels": [
+          "Angry",
+          "Neutral",
+          "Contempt"
+        ]
+      },
+      {
+        "cell": "hi-V hi-A hi-D",
+        "n_pairs": 638,
+        "p_disagree_within": 0.6603865008901548,
+        "excess": 0.0630068230782917,
+        "top_labels": [
+          "Happy",
+          "Neutral",
+          "Surprise"
+        ]
+      },
+      {
+        "cell": "hi-V lo-A lo-D",
+        "n_pairs": 443,
+        "p_disagree_within": 0.5966878173391252,
+        "excess": 0.04093446845870169,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Surprise"
+        ]
+      },
+      {
+        "cell": "lo-V lo-A lo-D",
+        "n_pairs": 665,
+        "p_disagree_within": 0.6700106709350405,
+        "excess": 0.029790915196488018,
+        "top_labels": [
+          "Neutral",
+          "Sad",
+          "Fear"
+        ]
+      }
+    ],
+    "examples": [
+      {
+        "key_a": "MSP-PODCAST_0823_0141_0003",
+        "key_b": "MSP-PODCAST_0783_0153",
+        "label_a": "Neutral",
+        "label_b": "Angry",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.4,
+          5.2,
+          4.6
+        ],
+        "vad_b": [
+          3.4,
+          5.2,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2448_0341",
+        "key_b": "MSP-PODCAST_1749_0005",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.2,
+          4.4,
+          4.6
+        ],
+        "vad_b": [
+          5.2,
+          4.4,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_3566_0438_0004",
+        "key_b": "MSP-PODCAST_1353_0093_0066",
+        "label_a": "Neutral",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.4,
+          4.8,
+          5.0
+        ],
+        "vad_b": [
+          3.4,
+          4.8,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2100_0089",
+        "key_b": "MSP-PODCAST_1751_0029",
+        "label_a": "Fear",
+        "label_b": "Surprise",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.2,
+          4.0,
+          4.2
+        ],
+        "vad_b": [
+          5.2,
+          4.0,
+          4.2
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0371_1710",
+        "key_b": "MSP-PODCAST_1755_0116",
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.8,
+          3.4,
+          3.8
+        ],
+        "vad_b": [
+          3.8,
+          3.4,
+          3.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1425_0003",
+        "key_b": "MSP-PODCAST_1695_0119_0012",
+        "label_a": "Disgust",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/6",
+        "vad_a": [
+          4.6,
+          5.0,
+          5.0
+        ],
+        "vad_b": [
+          4.67,
+          5.0,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_3936_0294",
+        "key_b": "MSP-PODCAST_0917_1404",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          5.0,
+          4.6,
+          5.4
+        ],
+        "vad_b": [
+          5.0,
+          4.6,
+          5.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2261_0690",
+        "key_b": "MSP-PODCAST_1356_0034",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.4,
+          4.0,
+          4.8
+        ],
+        "vad_b": [
+          4.4,
+          4.0,
+          4.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1416_0002_0004",
+        "key_b": "MSP-PODCAST_3054_0491",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.6,
+          4.4,
+          4.6
+        ],
+        "vad_b": [
+          4.6,
+          4.4,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_4759_0466",
+        "key_b": "MSP-PODCAST_0672_0716_0002",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.4,
+          4.2,
+          4.4
+        ],
+        "vad_b": [
+          4.4,
+          4.2,
+          4.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1754_0286",
+        "key_b": "MSP-PODCAST_5496_0791",
+        "label_a": "Neutral",
+        "label_b": "Angry",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          3.2,
+          5.0,
+          4.8
+        ],
+        "vad_b": [
+          3.2,
+          5.0,
+          4.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1686_0131_0022",
+        "key_b": "MSP-PODCAST_4365_0156",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.8,
+          2.6,
+          3.0
+        ],
+        "vad_b": [
+          4.8,
+          2.6,
+          3.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1908_0573",
+        "key_b": "MSP-PODCAST_4240_1198_0000",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.6,
+          4.6,
+          5.0
+        ],
+        "vad_b": [
+          4.6,
+          4.6,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1760_0371",
+        "key_b": "MSP-PODCAST_1660_0011_0095",
+        "label_a": "Contempt",
+        "label_b": "Neutral",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.0,
+          5.0,
+          4.4
+        ],
+        "vad_b": [
+          4.0,
+          5.0,
+          4.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_4509_0062_0001",
+        "key_b": "MSP-PODCAST_0830_0233_0003",
+        "label_a": "Angry",
+        "label_b": "Neutral",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.6,
+          5.0,
+          5.0
+        ],
+        "vad_b": [
+          3.6,
+          5.0,
+          5.0
+        ]
+      }
+    ],
+    "subtype_profiles": [
+      {
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "n_pairs": 11,
+        "subtype_gaps": [
+          {
+            "subtype": "Happy",
+            "mean_a": 0.13,
+            "mean_b": 0.732
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.591,
+            "mean_b": 0.195
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.07,
+            "mean_b": 0.263
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.096,
+            "mean_b": 0.228
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.226,
+            "mean_b": 0.137
+          }
+        ]
+      },
+      {
+        "label_a": "Happy",
+        "label_b": "Surprise",
+        "n_pairs": 7,
+        "subtype_gaps": [
+          {
+            "subtype": "Surprise",
+            "mean_a": 0.053,
+            "mean_b": 0.622
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.732,
+            "mean_b": 0.422
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.195,
+            "mean_b": 0.044
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.074,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.228,
+            "mean_b": 0.156
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Angry",
+        "n_pairs": 5,
+        "subtype_gaps": [
+          {
+            "subtype": "Angry",
+            "mean_a": 0.017,
+            "mean_b": 0.683
+          },
+          {
+            "subtype": "Frustrated",
+            "mean_a": 0.061,
+            "mean_b": 0.478
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.591,
+            "mean_b": 0.289
+          },
+          {
+            "subtype": "Annoyed",
+            "mean_a": 0.096,
+            "mean_b": 0.389
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.13,
+            "mean_b": 0.033
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "n_pairs": 5,
+        "subtype_gaps": [
+          {
+            "subtype": "Sad",
+            "mean_a": 0.061,
+            "mean_b": 0.648
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.591,
+            "mean_b": 0.243
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.035,
+            "mean_b": 0.329
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.226,
+            "mean_b": 0.452
+          },
+          {
+            "subtype": "Happy",
+            "mean_a": 0.13,
+            "mean_b": 0.0
+          }
+        ]
+      }
+    ]
+  },
+  "contested (high VAD dispersion)": {
+    "n_utterances": 38595,
+    "p_disagree_same_utterance": 0.7122198823353172,
+    "vad_se_in_sd_units": [
+      0.5769474508557388,
+      0.612401788853949,
+      0.6386127360606708
+    ],
+    "n_matched_pairs": 799476,
+    "shells": [
+      {
+        "n_pairs": 2443,
+        "mean_true_vad_dist_sq": -2.335212843420907,
+        "p_disagree_within": 0.7191395445571939,
+        "p_disagree_cross": 0.7786616846401362,
+        "p_disagree_cross_se": 0.0033650274699434136,
+        "excess_direct": 0.059522140082942314,
+        "excess_direct_se": 0.003553720359339662,
+        "excess_analytic": 0.05952214008294229,
+        "excess_analytic_se": 0.003156649437504724,
+        "excess_split_half": 0.05209007552210557,
+        "excess_split_half_se": 0.005588832838284296,
+        "radius_lo": 0.0,
+        "radius_hi": 0.1,
+        "excess_shuffled": 0.1116462095176941,
+        "excess_shuffled_sd": 0.0019229223050814862,
+        "share_unexplained": 0.5331317591530864
+      },
+      {
+        "n_pairs": 2127,
+        "mean_true_vad_dist_sq": -1.6491435832999368,
+        "p_disagree_within": 0.6983978458303965,
+        "p_disagree_cross": 0.7557698993305821,
+        "p_disagree_cross_se": 0.0036395198852473974,
+        "excess_direct": 0.057372053500185594,
+        "excess_direct_se": 0.0031126271390731195,
+        "excess_analytic": 0.05737205350018559,
+        "excess_analytic_se": 0.003164335180078751,
+        "excess_split_half": 0.055994370069801236,
+        "excess_split_half_se": 0.00430433904994566,
+        "radius_lo": 0.1,
+        "radius_hi": 0.2,
+        "excess_shuffled": 0.15308877968725454,
+        "excess_shuffled_sd": 0.0026757785529486337,
+        "share_unexplained": 0.37476328191648733
+      },
+      {
+        "n_pairs": 18303,
+        "mean_true_vad_dist_sq": -2.1409396744612095,
+        "p_disagree_within": 0.7136759864565239,
+        "p_disagree_cross": 0.7711887528583857,
+        "p_disagree_cross_se": 0.001322134866198129,
+        "excess_direct": 0.05751276640186188,
+        "excess_direct_se": 0.001265849312584793,
+        "excess_analytic": 0.05751276640186186,
+        "excess_analytic_se": 0.001158846350382658,
+        "excess_split_half": 0.05687170454809841,
+        "excess_split_half_se": 0.0019465411964810335,
+        "radius_lo": 0.2,
+        "radius_hi": 0.3,
+        "excess_shuffled": 0.12386420787621151,
+        "excess_shuffled_sd": 0.0007961640227439994,
+        "share_unexplained": 0.46432110928557735
+      },
+      {
+        "n_pairs": 83872,
+        "mean_true_vad_dist_sq": -2.038846243664373,
+        "p_disagree_within": 0.7159362544986143,
+        "p_disagree_cross": 0.775279919209538,
+        "p_disagree_cross_se": 0.0005209915099198633,
+        "excess_direct": 0.059343664710923574,
+        "excess_direct_se": 0.0005685267722561699,
+        "excess_analytic": 0.05934366471092357,
+        "excess_analytic_se": 0.000579523602668954,
+        "excess_split_half": 0.05923423778498673,
+        "excess_split_half_se": 0.0008919011876016578,
+        "radius_lo": 0.3,
+        "radius_hi": 0.5,
+        "excess_shuffled": 0.12122875458914266,
+        "excess_shuffled_sd": 0.00031095436087149984,
+        "share_unexplained": 0.4895180595729591
+      },
+      {
+        "n_pairs": 278228,
+        "mean_true_vad_dist_sq": -1.834525147632799,
+        "p_disagree_within": 0.7165111095987179,
+        "p_disagree_cross": 0.7796381131101556,
+        "p_disagree_cross_se": 0.0003024715760059193,
+        "excess_direct": 0.06312700351143763,
+        "excess_direct_se": 0.00032825402828207177,
+        "excess_analytic": 0.06312700351143763,
+        "excess_analytic_se": 0.0003151314052404257,
+        "excess_split_half": 0.06347436951013938,
+        "excess_split_half_se": 0.000507865009321931,
+        "radius_lo": 0.5,
+        "radius_hi": 0.75,
+        "excess_shuffled": 0.1199405090783929,
+        "excess_shuffled_sd": 0.000231308422222335,
+        "share_unexplained": 0.5263192894252094
+      },
+      {
+        "n_pairs": 414503,
+        "mean_true_vad_dist_sq": -1.4370482067392742,
+        "p_disagree_within": 0.7144725414358042,
+        "p_disagree_cross": 0.7839097498150751,
+        "p_disagree_cross_se": 0.0002596527133225706,
+        "excess_direct": 0.06943720837927074,
+        "excess_direct_se": 0.0002737332038289587,
+        "excess_analytic": 0.06943720837927074,
+        "excess_analytic_se": 0.0002478883769735205,
+        "excess_split_half": 0.06857221795923286,
+        "excess_split_half_se": 0.00038917093215095,
+        "radius_lo": 0.75,
+        "radius_hi": 1.0,
+        "excess_shuffled": 0.12378245336892726,
+        "excess_shuffled_sd": 0.00015283125886109304,
+        "share_unexplained": 0.5609616427000094
+      }
+    ],
+    "label_pairs": [
+      {
+        "a": "Neutral",
+        "b": "Happy",
+        "excess": 0.019452133711867547,
+        "mass": 0.1081989469093037,
+        "real_share": 0.1797811741011956
+      },
+      {
+        "a": "Neutral",
+        "b": "Surprise",
+        "excess": 0.010339867579894427,
+        "mass": 0.0448448815909606,
+        "real_share": 0.2305696260769844
+      },
+      {
+        "a": "Neutral",
+        "b": "Sad",
+        "excess": 0.00873809310592824,
+        "mass": 0.0796055795252874,
+        "real_share": 0.10976734492778246
+      },
+      {
+        "a": "Neutral",
+        "b": "Contempt",
+        "excess": 0.006750729086569027,
+        "mass": 0.04740473994059827,
+        "real_share": 0.14240620442234683
+      },
+      {
+        "a": "Neutral",
+        "b": "Fear",
+        "excess": 0.00562629266785317,
+        "mass": 0.025356145426989767,
+        "real_share": 0.2218906924971487
+      },
+      {
+        "a": "Neutral",
+        "b": "Disgust",
+        "excess": 0.004488328104892057,
+        "mass": 0.026644206248007056,
+        "real_share": 0.16845418711723778
+      },
+      {
+        "a": "Happy",
+        "b": "Surprise",
+        "excess": 0.004276042461193258,
+        "mass": 0.03286287063692109,
+        "real_share": 0.1301177401218617
+      },
+      {
+        "a": "Sad",
+        "b": "Angry",
+        "excess": 0.0031852225469322683,
+        "mass": 0.01412555318388034,
+        "real_share": 0.22549365008707406
+      },
+      {
+        "a": "Happy",
+        "b": "Fear",
+        "excess": 0.0024754232350602933,
+        "mass": 0.01709856311732514,
+        "real_share": 0.14477375777570853
+      },
+      {
+        "a": "Sad",
+        "b": "Disgust",
+        "excess": 0.002438676402587459,
+        "mass": 0.011034673885717439,
+        "real_share": 0.22100122104595427
+      },
+      {
+        "a": "Angry",
+        "b": "Disgust",
+        "excess": 0.002088303023045388,
+        "mass": 0.0118239034384602,
+        "real_share": 0.17661705661876947
+      },
+      {
+        "a": "Disgust",
+        "b": "Other",
+        "excess": 0.00204777269325504,
+        "mass": 0.006797817088234787,
+        "real_share": 0.3012397460354133
+      }
+    ],
+    "regions": [
+      {
+        "cell": "hi-V hi-A hi-D",
+        "n_pairs": 719,
+        "p_disagree_within": 0.7078406705784663,
+        "excess": 0.06806390078119759,
+        "top_labels": [
+          "Happy",
+          "Neutral",
+          "Contempt"
+        ]
+      },
+      {
+        "cell": "hi-V lo-A lo-D",
+        "n_pairs": 304,
+        "p_disagree_within": 0.6623701773372825,
+        "excess": 0.05650412750161208,
+        "top_labels": [
+          "Neutral",
+          "Happy",
+          "Sad"
+        ]
+      },
+      {
+        "cell": "lo-V hi-A hi-D",
+        "n_pairs": 429,
+        "p_disagree_within": 0.7751351233817296,
+        "excess": 0.05495066699022904,
+        "top_labels": [
+          "Neutral",
+          "Angry",
+          "Contempt"
+        ]
+      },
+      {
+        "cell": "lo-V lo-A lo-D",
+        "n_pairs": 509,
+        "p_disagree_within": 0.7028080913668205,
+        "excess": 0.047380029689618144,
+        "top_labels": [
+          "Neutral",
+          "Sad",
+          "Happy"
+        ]
+      }
+    ],
+    "examples": [
+      {
+        "key_a": "MSP-PODCAST_1660_0011_0114",
+        "key_b": "MSP-PODCAST_1662_0054_0029",
+        "label_a": "Surprise",
+        "label_b": "Sad",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.0,
+          3.8,
+          4.8
+        ],
+        "vad_b": [
+          5.0,
+          3.8,
+          4.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1753_0376",
+        "key_b": "MSP-PODCAST_1662_0210_0015",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.4,
+          3.8,
+          4.2
+        ],
+        "vad_b": [
+          4.4,
+          3.8,
+          4.2
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0879_0074_0006",
+        "key_b": "MSP-PODCAST_1767_0672",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.2,
+          4.4,
+          4.4
+        ],
+        "vad_b": [
+          4.2,
+          4.4,
+          4.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0614_0018",
+        "key_b": "MSP-PODCAST_1653_0017_0013",
+        "label_a": "Surprise",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          5.4,
+          4.8,
+          4.8
+        ],
+        "vad_b": [
+          5.4,
+          4.8,
+          4.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1622_0002_0142",
+        "key_b": "MSP-PODCAST_2252_0865",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          5.4,
+          4.6,
+          5.0
+        ],
+        "vad_b": [
+          5.4,
+          4.6,
+          5.0
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1750_0238",
+        "key_b": "MSP-PODCAST_5051_0008",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.4,
+          3.2,
+          4.6
+        ],
+        "vad_b": [
+          4.4,
+          3.2,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1609_0034",
+        "key_b": "MSP-PODCAST_1653_0013_0009",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.2,
+          3.8,
+          4.6
+        ],
+        "vad_b": [
+          4.2,
+          3.8,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0659_0016",
+        "key_b": "MSP-PODCAST_1240_0013",
+        "label_a": "Neutral",
+        "label_b": "Contempt",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.6,
+          4.2,
+          4.4
+        ],
+        "vad_b": [
+          4.6,
+          4.2,
+          4.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_0023_0445",
+        "key_b": "MSP-PODCAST_1173_0046_0001",
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.4,
+          2.2,
+          3.4
+        ],
+        "vad_b": [
+          4.4,
+          2.2,
+          3.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1662_0185_0004",
+        "key_b": "MSP-PODCAST_3110_0360",
+        "label_a": "Happy",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.6,
+          3.4,
+          3.8
+        ],
+        "vad_b": [
+          4.6,
+          3.4,
+          3.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1400_0026",
+        "key_b": "MSP-PODCAST_3131_0364_0000",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          5.0,
+          4.2,
+          4.6
+        ],
+        "vad_b": [
+          5.0,
+          4.2,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1171_0412_0011",
+        "key_b": "MSP-PODCAST_0130_0020",
+        "label_a": "Surprise",
+        "label_b": "Neutral",
+        "votes_a": "5/5",
+        "votes_b": "4/5",
+        "vad_a": [
+          4.4,
+          4.0,
+          4.6
+        ],
+        "vad_b": [
+          4.4,
+          4.0,
+          4.6
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_1496_0928_0001",
+        "key_b": "MSP-PODCAST_1622_0002_0085",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.4,
+          4.8,
+          4.8
+        ],
+        "vad_b": [
+          4.4,
+          4.8,
+          4.8
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_2736_0104",
+        "key_b": "MSP-PODCAST_1755_0470",
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          3.6,
+          3.0,
+          3.4
+        ],
+        "vad_b": [
+          3.6,
+          3.0,
+          3.4
+        ]
+      },
+      {
+        "key_a": "MSP-PODCAST_5169_0175",
+        "key_b": "MSP-PODCAST_1769_0204",
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "votes_a": "4/5",
+        "votes_b": "5/5",
+        "vad_a": [
+          4.6,
+          3.2,
+          3.6
+        ],
+        "vad_b": [
+          4.6,
+          3.2,
+          3.6
+        ]
+      }
+    ],
+    "subtype_profiles": [
+      {
+        "label_a": "Neutral",
+        "label_b": "Happy",
+        "n_pairs": 14,
+        "subtype_gaps": [
+          {
+            "subtype": "Happy",
+            "mean_a": 0.16,
+            "mean_b": 0.733
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.66,
+            "mean_b": 0.133
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.13,
+            "mean_b": 0.413
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.17,
+            "mean_b": 0.053
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.09,
+            "mean_b": 0.187
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Sad",
+        "n_pairs": 3,
+        "subtype_gaps": [
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.66,
+            "mean_b": 0.125
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.04,
+            "mean_b": 0.5
+          },
+          {
+            "subtype": "Depressed",
+            "mean_a": 0.02,
+            "mean_b": 0.2
+          },
+          {
+            "subtype": "Disappointed",
+            "mean_a": 0.04,
+            "mean_b": 0.15
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.17,
+            "mean_b": 0.075
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Surprise",
+        "n_pairs": 2,
+        "subtype_gaps": [
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.66,
+            "mean_b": 0.1
+          },
+          {
+            "subtype": "Surprise",
+            "mean_a": 0.06,
+            "mean_b": 0.55
+          },
+          {
+            "subtype": "Amused",
+            "mean_a": 0.13,
+            "mean_b": 0.4
+          },
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.17,
+            "mean_b": 0.1
+          },
+          {
+            "subtype": "Excited",
+            "mean_a": 0.09,
+            "mean_b": 0.15
+          }
+        ]
+      },
+      {
+        "label_a": "Neutral",
+        "label_b": "Contempt",
+        "n_pairs": 1,
+        "subtype_gaps": [
+          {
+            "subtype": "Concerned",
+            "mean_a": 0.17,
+            "mean_b": 1.0
+          },
+          {
+            "subtype": "Neutral",
+            "mean_a": 0.66,
+            "mean_b": 0.0
+          },
+          {
+            "subtype": "Sad",
+            "mean_a": 0.04,
+            "mean_b": 0.4
+          },
+          {
+            "subtype": "Frustrated",
+            "mean_a": 0.01,
+            "mean_b": 0.2
+          },
+          {
+            "subtype": "Annoyed",
+            "mean_a": 0.01,
+            "mean_b": 0.2
+          }
+        ]
+      }
+    ]
+  }
+}
