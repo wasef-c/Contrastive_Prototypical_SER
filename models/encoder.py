@@ -12,7 +12,8 @@ import warnings
 class FrozenBERTEncoder(nn.Module):
     """BERT encoder with optional partial unfreezing of top layers"""
 
-    def __init__(self, model_name="bert-base-uncased", output_dim=768, unfreeze_layers=0):
+    def __init__(self, model_name="bert-base-uncased", output_dim=768, unfreeze_layers=0,
+                 use_gradient_checkpointing=True):
         super().__init__()
 
         self.model_name = model_name
@@ -57,12 +58,14 @@ class FrozenBERTEncoder(nn.Module):
             # layers here are frozen, so every unfrozen layer received exactly
             # zero gradient: 0 of 34 tensors, against 32 of 34 with it off.
             # Every "unfrozen BERT" run before this fix trained nothing.
-            self.bert.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False})
+            if use_gradient_checkpointing:
+                self.bert.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False})
             trainable = sum(p.numel() for p in self.bert.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.bert.parameters())
             print(f"🔓 {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")
-            print(f"  Gradient checkpointing enabled")
+            print(f"  Gradient checkpointing "
+                  f"{'enabled' if use_gradient_checkpointing else 'DISABLED'}")
         else:
             self.bert.eval()  # Set to eval mode permanently when fully frozen
             print(f"✅ {model_name} loaded and frozen (output_dim={self.output_dim})")

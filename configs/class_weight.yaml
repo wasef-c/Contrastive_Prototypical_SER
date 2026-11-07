@@ -82,6 +82,13 @@ template_config: &template
   use_length_bucketing: true
   length_bucket_window: 50
 
+  # Gradient checkpointing off: the machine has 16 GB of VRAM idle at batch
+  # 16, so there is no reason to pay the recompute. Verified bitwise
+  # identical to checkpointing on (same loss to ten decimals, same gradients
+  # across all 89,183,496 trainable elements), so runs made either way stay
+  # comparable. Excluded from the config fingerprint for the same reason.
+  use_gradient_checkpointing: false
+
   # Defaults: everything off
   use_prototypical_weighting: false
   use_prototypical_label_smoothing: false
@@ -124,7 +131,17 @@ template_config: &template
   aux_vad_shuffle: false
 
   train_dataset: ["MSPP"]
-  test_datasets: ["IEMO", "MSPI", "CMUMOSEI", "SAMSEMO"]
+  # MSP-Improv and CMU-MOSEI are dropped from evaluation as of 2026-09-12:
+  # the paper reports IEMOCAP and SAMSEMO-EN only, and each extra corpus is
+  # paid for twice per seed, once in the metrics pass and again in the
+  # prediction dump, which is a second full forward pass. Measured on
+  # uf4_res_aux, the two dumps alone cost 211s per seed.
+  #
+  # Cost of this: MSP-Improv is one of only two evaluation corpora carrying
+  # real per-utterance VAD (SAMSEMO and CMU-MOSEI are all 0.5 fallback), so
+  # the auxiliary-head R2 analysis loses its second cross-corpus datapoint.
+  # Re-add it on an individual arm if that check is wanted again.
+  test_datasets: ["IEMO", "SAMSEMO"]
 
   # MSPI centroids (used as prototypes elsewhere; harmless when unused)
   expected_vad:
@@ -437,7 +454,7 @@ experiments:
   - <<: *template
     name: "iemo16_base"
     train_dataset: "IEMO"
-    test_datasets: ["MSPP", "SAMSEMO"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
     num_epochs: 16
     swa_last_n: 6
     unfreeze_audio_layers: 2
@@ -1322,3 +1339,3978 @@ experiments:
     use_proto_predictor: true
     proto_metric: "euclidean"
     class_weight_mode: "sqrt_inverse_freq"
+
+  # --- Residual variants ---------------------------------------------------
+  # Symmetric whitening instead of the Cholesky factor. Both satisfy
+  # W W^T = inv(cov) and give the same Mahalanobis norm, so this changes only
+  # the three components the head regresses, which differ by 0.267 on average.
+  # Cholesky is triangular, so its components depend on the order the VAD axes
+  # are listed in: the last is a scaled dominance alone while the first mixes
+  # all three. The symmetric root treats the axes evenly. A reviewer can
+  # reasonably ask whether that asymmetry matters; this answers it.
+  - <<: *template
+    name: "uf4_symw"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_whiten_form: "symmetric"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Signed decomposition, computed AFTER whitening so it is compared with the
+  # whitened residual on equal terms. Two outputs: a signed coordinate along
+  # the class's own direction away from neutral, and the magnitude of what is
+  # left. The motivation is that a Mahalanobis norm scores "more angry than
+  # the average angry" and "drifting toward neutral" as equally atypical, when
+  # only the second is near the neutral boundary this paper reports on.
+  #
+  # KNOWN DEFECT, recorded before running: for the neutral class the axis
+  # mu_c - mu_neutral is zero, so the along component is identically zero and
+  # those samples fall back to a pure magnitude. That is 38 percent of the
+  # training split on a degenerate target, and a magnitude-only target is what
+  # made protoscore null. If this arm underperforms, that is the first
+  # explanation to check, not the decomposition itself.
+  - <<: *template
+    name: "uf4_signedw"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "signedw"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ABLATION: is the whitening required to be class-conditional?
+  #
+  # One pooled whitening matrix shared by every class, instead of L_c per
+  # class. The target stays centred on the sample's own class mean, so
+  # "relative to your own prototype" survives; what goes is the claim that
+  # each class needs its own coordinate system. A 3-seed observation at a
+  # different depth put shared at +1.40 against per-class +1.46, inside seed
+  # noise, which would mean the rescaling matters and the class-conditionality
+  # does not. This promotes that observation to the reported configuration at
+  # the same five seeds as uf4_res so the two are paired.
+  - <<: *template
+    name: "uf4_shared"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_whiten_scope: "shared"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ABLATION: is the direction required, or only the magnitude?
+  #
+  # The scalar Mahalanobis distance ||L_c^T (v - mu_c)||, so the head predicts
+  # how atypical a sample is without predicting in which direction. This is
+  # the rung the comparison table has no answer for. Held-out analysis found
+  # magnitude alone already tracks the baseline's difficulty (Spearman +0.148
+  # against the true-label loss, and a coefficient of +0.336 in a joint model
+  # beside annotator disagreement's +0.434), so a scalar target may carry most
+  # of the effect. If it does, the claim simplifies to class-relative
+  # atypicality and the three-vector is unnecessary; if it does not, direction
+  # is load-bearing and the vector form is justified. Either outcome is
+  # reportable, which is why this arm is worth five seeds.
+  #
+  # Note the head is Linear(1024, 1) here against Linear(1024, 3) for uf4_res
+  # and the controls (proto_predictor_hidden_dim is 0, so the head is a bare
+  # linear map), so this arm is 2,050 parameters lighter. That is 2e-5 of the
+  # 89.8M trainable and cannot carry a result, but it does mean this rung is
+  # not capacity matched to the same tolerance as the permuted control.
+  # NOTE lambda 1.71 = 1/Var(||r||), matching res's effective auxiliary weight.
+  # At the default 1.0 this arm would have run at 0.593x, which is how the
+  # earlier magnitude-only evidence (ar_abs, +0.31 at 2/2) was produced: never
+  # a fair test of whether direction matters.
+  #
+  # This is the one salvage path for prototypicality as a TARGET. ||L_c^T(v -
+  # mu_c)|| is a norm, so not an affine function of VAD, and it is
+  # class-conditional in a way a linear head reading globally standardised VAD
+  # cannot compute. If it works at matched weight, whitevad cannot substitute
+  # for it and the class-relative construction is irreducible after all.
+  - <<: *template
+    name: "uf4_mahal"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "scalar"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 1.71
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # CONTROL: is it class-relativity, or just a better-conditioned target?
+  #
+  # Whitening applied to raw VAD using the GLOBAL mean and the MARGINAL
+  # covariance, with no class information anywhere in the transform. The map
+  # v -> W(v - mu) is affine and invertible, so this target carries exactly
+  # the information uf4_rawvad carries; only the conditioning changes, with
+  # the three axes decorrelated and put on a common scale.
+  #
+  # This closes the one gap the ladder cannot currently answer. uf4_res
+  # differs from uf4_rawvad in two ways at once, class-relative centering AND
+  # conditioning, so a reviewer can argue the gain is only that MSE on raw
+  # VAD weights three correlated axes of unequal scale unevenly. uf4_euclid
+  # does not settle it either, since it is centred as well as unconditioned.
+  #
+  # Reading: if this matches uf4_rawvad (+0.29 IEMOCAP AUCneu, +0.04 SAMSEMO
+  # UAR against the permuted control), conditioning explains nothing and the
+  # rescaling works only in combination with class-relative centering. If it
+  # matches uf4_res (+1.26, +1.00), the class-relative reading is wrong and
+  # the paper's claim has to change.
+  - <<: *template
+    name: "uf4_whitevad"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # P0 CONTROL: is the gain decorrelation, or only target rescaling?
+  #
+  # Scale-matched centred residual. The class centroid is subtracted as
+  # usual, then each coordinate is divided by its own within-class standard
+  # deviation. That is diagonal scaling, not full whitening: the target has
+  # unit variance per coordinate exactly like the whitened residual, but the
+  # class ellipsoid keeps its tilt, with off-diagonal covariance mass of 1.98
+  # against 0.015 for the full whitening.
+  #
+  # This completes the three-way separation the ladder needs:
+  #
+  #   arm            centred   unit scale   decorrelated
+  #   uf4_euclid     yes       no           no
+  #   uf4_scalematch yes       yes          no
+  #   uf4_res        yes       yes          yes
+  #
+  # Whitened against scale-matched isolates the decorrelation step with scale
+  # held fixed. Without it, uf4_res differs from uf4_euclid in two properties
+  # at once and a reviewer can argue the whole effect is target rescaling,
+  # which is the objection most likely to sink the paper.
+  - <<: *template
+    name: "uf4_scalematch"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_whiten_form: "diagonal"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # The headline configuration, rerun at one seed purely to capture the
+  # auxiliary head's predictions on every split.
+  #
+  # The head is discarded after training and was never persisted, so no
+  # existing run can say how well it actually fitted its target. This arm is
+  # identical to uf4_res in every field; the only difference is that it runs
+  # after the prediction dump learned to write aux_pred, the batch VAD and
+  # the fitted class statistics, which together allow the target to be
+  # reconstructed exactly offline and R2 computed per coordinate.
+  #
+  # IEMOCAP and MSP-Improv are the only evaluation corpora this can be
+  # measured on. SAMSEMO and CMU-MOSEI carry no per-utterance VAD in this
+  # build, so a residual is not defined for them.
+  #
+  # Runs first, so the new dump path is validated by a 2.8 hour job rather
+  # than discovered to be broken after the 14 hour scale-matched arm.
+  - <<: *template
+    name: "uf4_res_aux"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Does the neutral residual carry anything, or is it incoherent?
+  #
+  # Identical to uf4_res except the auxiliary loss is masked on neutral rows.
+  # The premise of the paper is that neutrality is the absence of emotion
+  # rather than an emotion. If that is right, "atypical for neutral" has no
+  # clear referent: a neutral utterance far from the neutral centroid is
+  # drifting toward some emotion, but the whitened residual states that drift
+  # in neutral's own coordinates and so says nothing about which emotion.
+  # Neutral is 45 percent of the training pool, so that target dominates the
+  # auxiliary gradient.
+  #
+  # Surviving weights are rescaled to mean one, so the auxiliary loss keeps
+  # the same magnitude and proto_predictor_weight stays comparable.
+  #
+  # CAVEAT for interpretation: this arm draws auxiliary gradient from only
+  # about 55 percent of rows, so its gradient-noise profile differs from
+  # uf4_ctrl_pool and the pairing is not as clean as the other rungs. Read a
+  # large win as worth a matched masked control, not as a finished result.
+  - <<: *template
+    name: "uf4_maskneu"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_skip_neutral: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Fit the class prototypes on high-agreement utterances only.
+  #
+  # Identical to uf4_res except the class means and covariances are estimated
+  # from the top quartile of within-class annotator agreement rather than from
+  # every row. The motivation is geometric: an utterance annotators split over
+  # contributes a consensus VAD that summarises the disagreement rather than
+  # measuring the emotion, so it blurs the prototype it is fitted into.
+  #
+  # Measured effect on the prototypes (q=0.75 against all samples):
+  #   neutral-sad    0.165 -> 0.225   (+36 percent)
+  #   neutral-happy  0.212 -> 0.224
+  #   neutral-angry  0.354 -> 0.439
+  #   sad-angry      0.395 -> 0.499
+  # Sad sits closest to neutral, and the confusion analysis shows recovered
+  # mass flooding into sad, so widening that specific gap is the targeted fix.
+  # It also matters more now than when first proposed: uf4_scalematch showed
+  # the effect is carried by per-axis rescaling, and consensus filtering
+  # changes exactly the statistics that rescaling uses, the class mean and the
+  # per-axis standard deviation.
+  #
+  # NOTE annot_consensus is the max of a 9-wide primary label distribution
+  # (Neutral, Happy, Sad, Angry, Contempt, Surprise, Disgust, Fear, Other), so
+  # the filter selects on agreement over the full taxonomy, not over the four
+  # trained classes. 51 percent of utterances carry at least one off-taxonomy
+  # vote.
+  #
+  # Prior evidence is weak and mildly unfavourable: cc_class at 2/2 scored
+  # 80.32 IEMOCAP AUCneu against us_res at 80.78, but on a different seed,
+  # unpaired, one run each.
+  - <<: *template
+    name: "uf4_cons"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_centroid_consensus_q: 0.75
+    proto_consensus_source: "class"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Class-balance the auxiliary loss instead of masking neutral out of it.
+  #
+  # Identical to uf4_res except each row's auxiliary MSE is weighted by the
+  # same class weights the classifier already uses (sqrt inverse frequency),
+  # renormalised to mean one per batch so the loss magnitude and
+  # proto_predictor_weight stay comparable.
+  #
+  # Motivation comes from uf4_maskneu. Neutral is 45 percent of the pool and
+  # dominates the auxiliary gradient by count, so masking it was the obvious
+  # fix; at three seeds that overshot, losing half the IEMOCAP neutral-AUC
+  # gain (+0.67 against +1.23), which says the neutral residual does carry
+  # information. Masking also handed 52 percent of the auxiliary gradient to
+  # happy, the one class where the residual arm already loses AUC.
+  #
+  # Share of the auxiliary gradient per class:
+  #   unweighted      N 45.3  H 28.5  S 10.7  A 15.5
+  #   class-balanced  N 34.9  H 27.7  S 16.9  A 20.4
+  #   masked          N  0.0  H 52.1  S 19.5  A 28.4
+  # The balanced version trims neutral without removing it and lifts sad from
+  # 10.7 to 16.9, which is the class the effect concentrates in.
+  #
+  # No new hyperparameter: the weights are the classifier's own.
+  - <<: *template
+    name: "uf4_clsbal"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_class_balanced: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Five ADDITIONAL seeds for the two headline arms, taking the four headline
+  # contrasts to ten paired seeds while every exploratory arm stays at five.
+  #
+  # The motivating number is SAMSEMO UAR. The effect is +0.95 and the minimum
+  # detectable effect at five seeds, computed from the observed seed-to-seed
+  # variance, is also 0.95: the weakest headline result sits exactly on its
+  # own detection floor. Ten seeds drops that floor to about 0.56.
+  #
+  # Seeds are fixed here before any of these runs execute, and are distinct
+  # from the original five (7, 42, 189, 1234, 2024). They are not chosen with
+  # reference to any result.
+  #
+  # These run with gradient checkpointing off, which was verified bitwise
+  # identical to on, so they pool with the original five without caveat.
+  # Report the run counts explicitly: ten for base/control/residual contrasts,
+  # five for the ablation and comparison arms, three for maskneu.
+  - <<: *template
+    name: "uf4_res_x2"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [13, 77, 256, 512, 2025]
+    use_proto_predictor: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_ctrl_pool_x2"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [13, 77, 256, 512, 2025]
+    use_proto_predictor: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Supervise the per-modality embeddings, not only the fused representation.
+  #
+  # The classifier reads the fused vector, so attaching the auxiliary target
+  # only there lets the fusion layer satisfy the task without either encoder
+  # having to encode prototypicality at all. This adds the same head, with the
+  # same target, to the audio embedding (3072-d) and the text embedding
+  # (768-d) as well. The three losses are averaged so the total auxiliary
+  # magnitude is unchanged and proto_predictor_weight stays comparable.
+  #
+  # modal_features are returned attached rather than detached for this arm, so
+  # gradient flows back into emotion2vec and BERT rather than stopping at the
+  # heads.
+  #
+  # CAVEAT the arm carries three auxiliary heads where every other arm carries
+  # one, so it is NOT capacity matched to uf4_ctrl_pool. A gain here cannot be
+  # attributed to per-modality supervision until a matched control is run
+  # (same three heads, shuffled targets).
+  - <<: *template
+    name: "uf4_modheads"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_modality_heads: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Scale-matched euclid: the clean resolution of the target-scale confound.
+  #
+  # Every arm sets proto_predictor_weight 1.0, but MSE scales with the
+  # target's variance, and the targets differ by up to 65x:
+  #   rawvad 0.0251, euclid 0.0152, scalematch 0.9929, res 0.9878.
+  # So uf4_euclid's null (+0.17 IEMOCAP AUCneu) may reflect a nearly
+  # switched-off auxiliary head rather than an uninformative target, and
+  # "rescaling is the mechanism" is currently confounded with "euclid had 65x
+  # less loss".
+  #
+  # This is uf4_euclid with lambda set to 1/0.0152 = 65.8, matching res's
+  # effective auxiliary weight exactly. Identical target, identical geometry,
+  # identical information; only the loss scale differs. Near +0.17 means the
+  # null is real and the ablation ladder stands. A jump means it does not.
+  - <<: *template
+    name: "uf4_euclid_lam"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_metric: "euclidean"
+    proto_predictor_weight: 65.8
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- Parked for a follow-up paper; not needed for this submission ----
+
+  # Matched control for uf4_maskneu: same masking, shuffled targets. Without
+  # it, maskneu's gradient comes from ~55 percent of rows against the pool
+  # control's 100, so its comparison is not capacity matched.
+  - <<: *template
+    name: "uf4_maskneu_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_skip_neutral: true
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Score the head only on within-class variation. The target's per-class mean
+  # is zero by construction, yet the head predicts -0.29 to +0.26 and 8.5
+  # percent of its output variance is class alone (26 percent on IEMOCAP).
+  # Centring both sides per class removes that shortcut.
+  - <<: *template
+    name: "uf4_predcentre"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_centre_pred: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Does a head that can actually fit the target transfer better, or does it
+  # absorb the task? The linear head reaches R2 0.21 in domain and 0.10 across
+  # corpora. A hidden layer fits better but weakens the pressure on the trunk,
+  # which is the argument the linear head was chosen on.
+  - <<: *template
+    name: "uf4_widehead"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 256
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Matched control for uf4_whitevad.
+  #
+  # uf4_ctrl_pool is already scale matched to whitevad (both targets have unit
+  # sd), so the existing comparison is defensible. It is not an exact marginal
+  # match: ctrl_pool draws from real residuals, which are heavier tailed than
+  # globally whitened VAD (kurtosis 4.48 against 2.71 on component 0).
+  #
+  # This permutes whitevad's OWN targets, so the control's marginal is exactly
+  # the arm's marginal. It uses batch rather than pool mode deliberately: the
+  # pool is built from residual_targets, so pool mode would hand this arm real
+  # residuals rather than whitened VAD. Batch permutation leaves about 6
+  # percent fixed points, which measurement puts at 0.07 AUCneu against the
+  # pool control, an acceptable cost for an exact marginal match.
+  - <<: *template
+    name: "uf4_whitevad_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "batch"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- Scale-matched comparison arms ----
+  #
+  # Every arm in the comparison table sets proto_predictor_weight 1.0, but MSE
+  # scales with the target's variance, and the comparison targets are far
+  # smaller than the residual:
+  #
+  #   agreement   0.0449   effective lambda 0.045x   (22x weaker than res)
+  #   dispersion  0.1659   0.168x                    (6x weaker)
+  #   offlabel    0.0998   0.101x                    (10x weaker)
+  #   res         0.9878   1.000x
+  #
+  # So every null in that table was measured with the auxiliary head running
+  # at a small fraction of the weight the residual arm had, and the conclusion
+  # "annotator-derived targets do not transfer" is not yet supported. These
+  # arms set lambda = 1/Var(target), which matches the effective auxiliary
+  # weight exactly while leaving the target, its information and its geometry
+  # untouched.
+  #
+  # Scale matching by lambda rather than by standardising the target keeps the
+  # change config-only and avoids introducing a second difference; scalematch
+  # already showed decorrelation contributes nothing, so per-axis whitening of
+  # these targets would add a factor that is known not to matter.
+  - <<: *template
+    name: "uf4_agree_lam"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "agreement"
+    proto_predictor_weight: 22.3
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_disp_lam"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "dispersion"
+    proto_predictor_weight: 6.03
+    class_weight_mode: "sqrt_inverse_freq"
+
+  - <<: *template
+    name: "uf4_offlabel_lam"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "offlabel"
+    proto_predictor_weight: 10.0
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Prototypicality AND annotator agreement in one target.
+  #
+  # Q2 measured the two as independent routes to model difficulty: in a joint
+  # logistic with class fixed effects, disagreement carries +0.434 and
+  # residual magnitude +0.336, each surviving the other's presence, and the
+  # two are near orthogonal within class (Spearman -0.003). Neither displaces
+  # the other, so the pair may be worth more than either alone.
+  #
+  # Target is [whitened residual (3), standardised agreement (1)], both halves
+  # at unit variance. The head widens from 3 to 4, so this arm is 1,025
+  # parameters heavier than uf4_res and is not exactly capacity matched to
+  # uf4_ctrl_pool; that is 1e-5 of the trainable total.
+  #
+  # This is deliberately NOT the existing resdisp kind, which uses dispersion
+  # rather than agreement (inert in the joint model) and leaves that half
+  # carrying 18.8x the residual half's weight.
+  - <<: *template
+    name: "uf4_resagree"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "resagree"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Globally whitened VAD plus standardised agreement: the fourth cell.
+  #
+  # Crossing class-relative centring with annotator agreement:
+  #
+  #                       alone        + agreement
+  #   no class centring   whitevad     vadagree
+  #   class-relative      res          resagree
+  #
+  # resagree against res alone cannot say whether centring still contributes
+  # once agreement is in the target; this arm can. It matters most if
+  # whitevad turns out to match res, because then the question becomes
+  # whether class-relative centring adds anything at all, at any point.
+  #
+  # Target is [globally whitened VAD (3), standardised agreement (1)], both
+  # halves at unit variance. Head is 4 wide, matching resagree.
+  - <<: *template
+    name: "uf4_vadagree"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "vadagree"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # A fixed random target per utterance: learnable, but meaningless.
+  #
+  # The decisive test of the within-class-variance mechanism. Every existing
+  # control redraws its target each batch, so the head can never fit it and
+  # the trunk receives only noise; those gain +0.28 AUCneu. This target is
+  # drawn once per utterance from N(0,1) and held fixed for all eight epochs,
+  # so the head CAN fit it, but only by making the shared embedding keep
+  # utterances individually distinguishable. That is exactly the within-class
+  # spread cross-entropy collapses (control 0.72) and every helpful arm
+  # restores (0.79 to 0.83).
+  #
+  # Reading: near +1.6 means the mechanism is preserving within-class geometry
+  # and the emotional content of the target is irrelevant, which would be the
+  # strongest and most surprising result in the project. Near +0.3 means
+  # content matters and the regulariser reading is wrong.
+  #
+  # Unit covariance by construction, so the effective auxiliary weight matches
+  # uf4_res. Head width identical. The only difference from uf4_res is what
+  # the target means.
+  - <<: *template
+    name: "uf4_randfixed"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "randfixed"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Prototypicality as a LOSS WEIGHT rather than a regression target.
+  #
+  # The whitened residual as an auxiliary target turned out to be redundant:
+  # globally standardised VAD matches it to +0.02 (p=0.92) and moves exactly
+  # the same errors (neutral precision identical to two decimals). That is
+  # because the target is an affine function of VAD given the class, so a
+  # plain VAD regression can express it.
+  #
+  # Weighting is categorically different. The per-sample CE weight
+  # exp(alpha * ||L_c^T (v - mu_c)||) is a NORM, so it is not affine in VAD,
+  # and no auxiliary regression head can implement it: it reweights the main
+  # objective rather than adding a prediction. It is also the direct
+  # expression of the paper's thesis, that atypical utterances are the ones
+  # hard categorical labels fail on, so the model should learn more from them.
+  #
+  # The auxiliary head stays ON with the usual whitened residual target. The
+  # weighting is applied ALONGSIDE it, so atypicality is used twice and in two
+  # different ways: the head shapes the shared representation, the weight
+  # decides how much each utterance contributes to the classifier. These are
+  # different mechanisms, and only the second is beyond what a plain VAD
+  # regression can express.
+  #
+  # Pairs against uf4_res, which is the same arm without the weighting, so the
+  # comparison isolates the weighting alone.
+  #
+  # alpha 0.5, not the 2.0 default: that default was tuned for the Euclidean
+  # distance to hardcoded centroids, which has a much smaller range. At 2.0
+  # the Mahalanobis version puts 86 percent of the loss on 1 percent of rows.
+  # At 0.5 the middle 80 percent of weights run 0.60 to 1.47.
+  - <<: *template
+    name: "uf4_res_ceatyp"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    use_prototypical_weighting: true
+    ce_weight_source: "mahal"
+    ce_weight_invert: true
+    prototypical_weighting_alpha: 0.5
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # The same, downweighting atypical rows instead. If atypical utterances are
+  # noise rather than signal the sign should flip, and the pair brackets it.
+  - <<: *template
+    name: "uf4_res_ceproto"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    use_prototypical_weighting: true
+    ce_weight_source: "mahal"
+    ce_weight_invert: false
+    prototypical_weighting_alpha: 0.5
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # exp(-||r||): bounded prototypicality, 1 at the class centre decaying to 0.
+  # Strongly nonlinear rather than merely non-affine, and it compresses the
+  # long right tail that MSE on the raw distance over-weights. lambda 37.8 =
+  # 1/Var, matching res; at the default 1.0 it ran at 0.027x, which makes its
+  # 2/2 result of +1.10 the most under-weighted arm that still worked.
+  - <<: *template
+    name: "uf4_protoscore"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    use_proto_predictor: true
+    proto_target: "protoscore"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 37.8
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- VAD-trust weighting: confine the VAD target to rows VAD explains ----
+  #
+  # A Gaussian class-conditional VAD classifier fitted on MSP-Podcast and
+  # transferred to IEMOCAP misclassifies 34.8 percent of that corpus. Scoring
+  # every arm against its matched control on that split (see
+  # analysis/vad_explained_split.py):
+  #
+  #   whitevad vs ctrl_pool   +0.85 explained *   -1.06 unexplained *
+  #   res_more vs ctrl_pool   +0.55               -1.20
+  #   offlabel vs ctrl_pool   -0.46               -1.58
+  #   ctrl_pool vs base_more  +0.53               +0.98 *
+  #
+  # Twelve of fifteen arms lose on the unexplained half (binomial p=0.018).
+  # The head CAPACITY helps that half; it is the VAD CONTENT that costs. So
+  # whitevad's whole benefit sits in the half VAD already had, and its net
+  # effect against no head at all on the unexplained half is -0.08.
+  #
+  # These arms weight the auxiliary MSE by the Gaussian posterior of the row's
+  # own label, so the VAD target is applied where VAD and the label agree and
+  # falls silent where they conflict. per_class mode rescales the weights to
+  # mean one WITHIN each class: the raw posterior averages 0.41 on neutral
+  # against 0.78 on angry, so the global mode would silently reweight classes
+  # and be confounded with clsbal, which is already known not to help.
+  #
+  # Prediction, recorded before running: the explained half holds near +0.85
+  # and the unexplained half moves from -1.06 toward 0. If BOTH collapse, the
+  # head needed gradient from all rows and this whole reading is wrong.
+  #
+  # These are new arms with no cached runs, so adding MSPI to test_datasets is
+  # safe here. It must NOT be added to the shared template: is_run_finished
+  # does a subset check on test_datasets, so every completed arm would be
+  # retrained.
+  - <<: *template
+    name: "uf4_vadtrust"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_vad_trust: "per_class"
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Matched control. Permutes the trust weights across the batch, so their
+  # distribution is preserved exactly and only the pairing with the sample is
+  # destroyed. Any gain that survives this is not the mechanism.
+  - <<: *template
+    name: "uf4_vadtrust_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_vad_trust: "per_class"
+    proto_vad_trust_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Seed top-up for uf4_agree_lam, which is the ONLY informative arm positive
+  # on the VAD-unexplained half (+0.98 at 3 seeds, ns). It is also the only
+  # target in the sweep that is not VAD, which is the reason to take it
+  # seriously rather than treat it as noise.
+  #
+  # A separate arm rather than an extended seeds list: seeds IS part of the
+  # config fingerprint (verified 2026-09-15), so editing uf4_agree_lam's list
+  # would mark its three finished runs stale and retrain them. Same reason
+  # uf4_res_more and uf4_base_more exist.
+  - <<: *template
+    name: "uf4_agree_lam_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    use_proto_predictor: true
+    proto_target: "agreement"
+    proto_predictor_weight: 22.3
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- Gradient surgery at 4/4, where the harm is actually measured ----
+  #
+  # The auxiliary head hurts on rows a VAD-only classifier gets wrong: whitevad
+  # is +0.85 explained / -1.06 unexplained against uf4_ctrl_pool, both p<0.05
+  # over five seeds. The proposed mechanism is gradient conflict. On an
+  # unexplained row VAD points at a rival class while the label does not, so
+  # the auxiliary and classification gradients oppose each other through the
+  # shared trunk, and the encoder is asked to represent evidence against the
+  # correct answer.
+  #
+  # PCGrad projects the auxiliary gradient onto the orthogonal complement of
+  # the main gradient wherever they conflict. Orthogonal components pass
+  # through untouched, so the usual justification for an auxiliary task
+  # (retaining information CE would discard) is preserved.
+  #
+  # Two outcomes, and they are distinguishable:
+  #   explained holds near +0.85, unexplained -> 0   conflict was the harm
+  #   BOTH collapse                                  the conflict WAS the
+  #                                                  benefit, and the head only
+  #                                                  ever worked by opposing CE
+  #
+  # Uses proto_pcgrad_per_sample, NOT the older batch-level proto_pcgrad. The
+  # batch-level version takes gradients of the batch-MEAN losses, so its
+  # conflict test runs on the aggregate per parameter tensor. At batch 16 with
+  # a 65/35 explained to unexplained mix the auxiliary gradient is dominated by
+  # explained rows before any projection happens, so it cannot protect the
+  # minority where the conflict lives.
+  #
+  # The per-sample version projects row by row at the shared representation,
+  # against the CLASSIFICATION gradient captured in one extra partial backward
+  # through the classifier head only. Verified 2026-09-15: conflicting rows are
+  # orthogonalised to within 1e-4, agreeing rows are bitwise unchanged, no row
+  # gradient norm grows, the projection is invariant to scaling of the
+  # reference (so AMP loss scaling cannot perturb it), and the disabled path is
+  # an exact identity.
+  #
+  # Read against uf4_whitevad and uf4_ctrl_pool, both 5 seeds at this exact
+  # configuration. No new control is needed.
+  #
+  # pcgrad_res is the only prior run: 2/2, seed 42 only, at a draw where the
+  # harm did not appear (-0.06), so it settled nothing. The 4-seed 2/2 arm
+  # cw_sqrt_res_more does show it at -0.77.
+  #
+  # New arm, no cached runs, so MSPI in test_datasets is safe here. It must NOT
+  # go in the shared template: is_run_finished subset-checks test_datasets and
+  # every completed arm would retrain.
+  - <<: *template
+    name: "uf4_whitevad_pcgrad_ps"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_pcgrad_per_sample: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- Explainability head, ADDITIONAL to the VAD regression head ----
+  #
+  # A second auxiliary output predicting whether this row's label is accounted
+  # for by its VAD at all, i.e. whether a RIVAL class centre sits closer than
+  # its own. Runs alongside the whitevad regression target rather than
+  # replacing it, so the comparison against uf4_whitevad isolates what the
+  # second task adds.
+  #
+  # Why this quantity and not the residual norm. On IEMOCAP the toward-rival
+  # component of the residual predicts the explained/unexplained split at AUC
+  # 0.931, the residual NORM reaches only 0.654, and the orthogonal component
+  # is exactly chance at 0.500. Half of the most displaced quintile by norm is
+  # still explained, because those rows drifted where no rival lives. mahal and
+  # protoscore are both functions of the norm and so aim at the weaker of the
+  # two. This targets the competitive condition directly.
+  #
+  # Why it survives the critique that sank the class-relative residual: it is
+  # non-affine in VAD and depends on ALL FOUR class centres, so a globally
+  # standardised VAD target cannot reproduce it. whitevad matched res at
+  # p=0.918 precisely because the class-relative construction was an affine
+  # recoding; a max over classes is not.
+  #
+  # The existing head does not already carry this. Inverting uf4_whitevad's
+  # own aux_pred back to a predicted VAD recovers explainability at AUC 0.671
+  # over five seeds, against 1.000 from true VAD, and its thresholded agreement
+  # of 62.9 percent is BELOW the 65.2 percent majority baseline because the
+  # predicted residual is shrunk by about half.
+  #
+  # Binary under BCE, so there is no target variance to match and the
+  # proto_predictor_weight confound that distorted the earlier comparison table
+  # does not arise. expl_head_weight is relative to the regression term; both
+  # losses are order 1 at init (MSE about 1.0 on a unit-variance target, BCE
+  # about 0.69 at the 0.666 base rate), so 1.0 needs no calibration.
+  #
+  # Implementation note: with proto_predictor_hidden_dim 0 the head is a bare
+  # nn.Linear whose output rows share no parameters, so one Linear(1024, 4) is
+  # mathematically identical to two independent heads. train.py refuses
+  # use_expl_head with a hidden layer, where they would genuinely share weights.
+  #
+  # New arms, no cached runs, so MSPI in test_datasets is safe. It must NOT go
+  # in the shared template: is_run_finished subset-checks test_datasets and
+  # every completed arm would retrain.
+  - <<: *template
+    name: "uf4_whitevad_expl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    use_expl_head: true
+    expl_head_weight: 1.0
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # Matched control. Permutes the explainability targets across the batch, so
+  # their class balance is preserved exactly and only the pairing with the
+  # sample is destroyed. The regression half is untouched, so this isolates the
+  # explainability task specifically rather than the extra output row.
+  - <<: *template
+    name: "uf4_whitevad_expl_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7, 1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    use_expl_head: true
+    expl_head_weight: 1.0
+    expl_head_shuffle: true
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ---- Mixup whose label follows the blend, not the parent ----
+  #
+  # Existing muted mixup keeps the parent's hard emotional label on a point
+  # blended toward neutral. Measured at 3 seeds on IEMOCAP that is what costs
+  # neutral: recall falls 54.3 -> 36.6 -> 27.4 as blending increases, with the
+  # mass moving into happy (17.9 -> 27.3 -> 31.6) and sad (20.3 -> 27.6 ->
+  # 31.3). Both mixup variants lose to a no-mixup baseline (-1.12 p=0.008 and
+  # -1.95 p=0.007), and under oracle per-class recalibration all three
+  # converge to 62.3-62.5, so the apparent happy and sad gains were the
+  # operating point sliding rather than better discrimination.
+  #
+  # Here the blend's VAD is interpolated at the same lambda and the fitted
+  # class model assigns the label. The correspondence is exact rather than
+  # assumed: the auxiliary head is a bare nn.Linear, and a linear map of a
+  # convex combination is the convex combination of the maps. A blend landing
+  # in neutral's region becomes neutral, so no synthetic point is mislabelled
+  # by construction.
+  #
+  # Measured on 20,000 real blends, the derived label differs from the
+  # inherited one 38.6 percent of the time and 74.7 percent of those become
+  # neutral, so the intervention is large and aimed where the damage was.
+  #
+  # Verified 2026-09-16: lambda 1 returns the source class, lambda 0 returns
+  # the partner's, and an angry-to-neutral sweep flips at lambda 0.45.
+  #
+  # The risk is that neutral and sad are the closest pair in VAD (0.165, ratio
+  # 0.52 to the mean pair distance under every affine transform tried), so
+  # blends near that boundary get noisy labels. The gated arm discards them.
+  - <<: *template
+    name: "uf4_vadmix_derive"
+    # The fitted class VAD statistics live behind use_proto_predictor,
+    # and derive_labels needs them to place a blend. The head is built
+    # but given zero weight, so it contributes no gradient. Identical
+    # across all three arms, so it cancels in the comparison.
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_vad_calibrated: true
+    muted_mixup_vad_quantile: 0.5
+    muted_mixup_derive_labels: true
+    muted_mixup_derive_min_posterior: 0.0
+
+  # Same blends, same count, gate on the blend's class posterior so points
+  # falling in the neutral/sad ambiguity are discarded rather than guessed.
+  - <<: *template
+    name: "uf4_vadmix_derive_gate"
+    # The fitted class VAD statistics live behind use_proto_predictor,
+    # and derive_labels needs them to place a blend. The head is built
+    # but given zero weight, so it contributes no gradient. Identical
+    # across all three arms, so it cancels in the comparison.
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_vad_calibrated: true
+    muted_mixup_vad_quantile: 0.5
+    muted_mixup_derive_labels: true
+    muted_mixup_derive_min_posterior: 0.5
+
+  # THE CONTROL THAT MATTERS. Identical synthetic data, identical blend
+  # coefficients, identical count and gradient path. The only difference is
+  # that the label is inherited from the dominant parent, which is the
+  # existing behaviour. This isolates the labelling rule and nothing else.
+  - <<: *template
+    name: "uf4_vadmix_inherit"
+    # The fitted class VAD statistics live behind use_proto_predictor,
+    # and derive_labels needs them to place a blend. The head is built
+    # but given zero weight, so it contributes no gradient. Identical
+    # across all three arms, so it cancels in the comparison.
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_vad_calibrated: true
+    muted_mixup_vad_quantile: 0.5
+    muted_mixup_derive_labels: false
+
+  # ---- General mixup with a soft, geometry-derived target ----
+  #
+  # Three changes from the directed variants, each answering a measurement.
+  #
+  # ANY PAIR. muted_mixup blends only emotional samples toward neutral, so
+  # neutral is a partner and never a source and gets no synthetic data.
+  # symmetric_mixup_step adds the reverse direction but still only crosses the
+  # neutral boundary.
+  #
+  # CONTROLLED LAMBDA. The VAD-calibrated coefficient has median 0.47 with a
+  # tenth of blends below 0.09, i.e. 91 percent partner. sample_lambda already
+  # folds Beta(alpha, alpha) into [0.5, 1] for exactly this reason; the
+  # VAD-calibrated path had reintroduced the extremes it was written to avoid.
+  #
+  # SOFT TARGET. Inheriting the parent's label drove neutral recall from 54.3
+  # to 27.4 percent. Taking the argmax of the blended VAD fixes the direction
+  # but still asserts confidence: over 30,000 blends the top posterior is
+  # below 0.5 on 27.7 percent, and at the class flip points it is 0.33 (angry),
+  # 0.42 (sad), 0.46 (happy). Here the posterior IS the target, so no switch
+  # point or threshold is chosen anywhere.
+  #
+  # Verified 2026-09-17: lambda in [0.50, 0.99] median 0.68; targets sum to 1;
+  # the soft argmax differs from the dominant source's label on 37.9 percent
+  # of blends; soft and hard paths produce identical coefficients and
+  # identical blends given the same draw, so only the target differs.
+  - <<: *template
+    name: "uf4_softmix"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  # Matched control: identical pairs, identical coefficients, identical
+  # blends. The only difference is that the target is the dominant source's
+  # hard label rather than the blend's posterior. That isolates the soft
+  # geometry-derived target and nothing else.
+  - <<: *template
+    name: "uf4_softmix_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_hard_control: true
+
+  # ---- Soft target in the AGGRESSIVE blending regime ----
+  #
+  # The four cells of this design, measured at 3 seeds each:
+  #
+  #   lambda       label      neutral   net effect
+  #   aggressive   inherited    48.3%   damage (-0.64 recal vs ctrl_pool)
+  #   mild         hard         67.7%   inert  (-0.57 recal)
+  #   mild         SOFT         64.9%   +0.63 recal over its own control, p=0.042
+  #   aggressive   SOFT             ?   this arm
+  #
+  # Aggressive blending is the regime where the augmentation does something;
+  # it was abandoned because a hard label there is mislabelling by
+  # construction. A soft target removes that objection: the target follows the
+  # blend rather than its source, so a partner-dominated blend is described
+  # honestly instead of being asserted to be its source's class.
+  #
+  # If the soft target's value is repairing mislabelled blends, the effect
+  # should be LARGEST here, where the mislabelling was worst. If it is flat,
+  # the mild-regime result was something else.
+  #
+  # alpha 1.0 unfolded gives p10 0.10, median 0.50, matching the VAD-calibrated
+  # coefficient that caused the damage (p10 0.09, median 0.47). Verified
+  # 2026-09-18, along with soft and hard paths drawing identical coefficients
+  # and identical blends, disagreeing on 37.7 percent of labels.
+  - <<: *template
+    name: "uf4_softmix_agg"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+
+  # Matched control. Identical pairs, coefficients and blends; the target is
+  # the hard label of whichever endpoint dominates. Unfolded lambda means the
+  # dominant endpoint is chosen per sample rather than always being the source.
+  - <<: *template
+    name: "uf4_softmix_agg_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+    muted_mixup_hard_control: true
+
+  # ---- THE control the novelty claim actually needs ----
+  #
+  # Standard mixup is ALREADY soft: its target is lam * y_source + (1 - lam) *
+  # y_partner. Comparing the geometry-derived target only against a HARD label
+  # conflates two effects, soft beating hard (textbook) and geometry beating
+  # lambda-interpolation (the claim). uf4_softmix_ctrl is a worse-than-vanilla
+  # baseline, so the +0.63 measured against it overstates the contribution.
+  #
+  # The two soft targets are genuinely different supervision. Over 40,000
+  # blends their median total-variation distance is 0.41, their argmax agrees
+  # on 63 percent, and median entropy is 0.39 for vanilla against 0.95 for
+  # geometry. Vanilla can only place mass on the two endpoint classes;
+  # geometry places more than a quarter of its mass on a THIRD class in 37
+  # percent of blends, which is the thing lambda-interpolation cannot express.
+  #
+  # The known risk runs the other way: on the 32 percent of blends whose
+  # endpoints share a class, vanilla is correctly one-hot while geometry is
+  # only 0.502 confident. If geometry loses, that is the likely reason.
+  - <<: *template
+    name: "uf4_softmix_vanilla"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  # Same, in the aggressive regime, matched to uf4_softmix_agg.
+  - <<: *template
+    name: "uf4_softmix_agg_vanilla"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+    muted_mixup_vanilla_target: true
+
+  # ---- Seed top-ups to n=5 ----
+  #
+  # Separate arms rather than extended seed lists: `seeds` is part of the
+  # config fingerprint (verified 2026-09-15), so editing the list would mark
+  # the finished three-seed runs stale and retrain them. Same reason
+  # uf4_base_more and uf4_res_more exist. Analysis pools each arm with its
+  # _more counterpart, exactly as uf4_base + uf4_base_more are pooled.
+
+  - <<: *template
+    name: "uf4_softmix_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "uf4_softmix_vanilla_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "uf4_softmix_agg_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+
+  - <<: *template
+    name: "uf4_softmix_agg_vanilla_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "uf4_softmix_ctrl_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_hard_control: true
+
+  - <<: *template
+    name: "uf4_softmix_agg_ctrl_more"
+    seeds: [1234, 2024]
+    wandb_project: "MVP_ClassWeight"
+    task_type: "classification"
+    num_classes: 4
+    modality: "both"
+    audio_dim: 768
+    text_model_name: "bert-base-uncased"
+    text_max_length: 128
+    hidden_dim: 1024
+    dropout: 0.1
+    audio_encoder_type: "emotion2vec"
+    audio_model_name: "iic/emotion2vec_base"
+    unfreeze_audio_layers: 4
+    audio_learning_rate: "1e-5"
+    max_audio_seconds: 10
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    audio_pooling: "frames"
+    num_frames: 32
+    num_attn_heads_pool: 4
+    attn_pool_hidden: 256
+    use_mean_pool_control: false
+    fusion_type: "cross_attention"
+    fusion_hidden_dim: 1024
+    num_attention_heads: 8
+    num_epochs: 8
+    batch_size: 16
+    eval_batch_size: 16
+    gradient_accumulation_steps: 2
+    num_workers: 2
+    learning_rate: "5e-6"
+    weight_decay: "1e-4"
+    val_split: 0.25
+    use_early_stopping: false
+    model_selection: "swa_last_n"
+    swa_last_n: 3
+    class_weight_mode: "sqrt_inverse_freq"
+    save_predictions: true
+    train_subsample_frac: 1.0
+    use_length_bucketing: true
+    length_bucket_window: 50
+    use_gradient_checkpointing: false
+    use_prototypical_weighting: false
+    use_prototypical_label_smoothing: false
+    use_contrastive: false
+    use_domain_adversarial: false
+    use_modality_adversarial: false
+    use_prototypical_adversarial: false
+    use_multiview_prototypicality: false
+    use_memory_bank: false
+    use_cross_modal_projection: false
+    use_two_stage_training: false
+    use_proto_predictor: true
+    proto_predictor_hidden_dim: 0
+    proto_target: "whitevad"
+    proto_metric: "mahalanobis"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_proto_dist_logits: false
+    proto_dist_permute: false
+    proto_centroid_consensus_q: 0.0
+    proto_dist_alpha_min: 0.0
+    use_vadmix: false
+    use_vrex: false
+    use_curriculum_learning: false
+    use_corpus_balanced_sampler: false
+    use_hierarchical_head: false
+    use_proto_atyp_split: false
+    use_annotator_meta: true
+    use_aux_vad_cluster: false
+    aux_vad_task: "cluster"
+    aux_vad_cluster_scope: "per_class"
+    aux_vad_clusters_per_class: 2
+    aux_vad_cluster_weight: 0.2
+    aux_vad_cluster_init: "random"
+    aux_vad_head_depth: 1
+    aux_vad_subtype_dim: 16
+    aux_vad_agreement_weight: false
+    aux_vad_shuffle: false
+    train_dataset: ["MSPP"]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    expected_vad: {0: [0.4895, 0.4885, 0.5267], 1: [0.6369, 0.6091, 0.6089], 2: [0.3567, 0.3964, 0.4427], 3: [0.2475, 0.7317, 0.7516]}
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 1.0
+    muted_mixup_general_soft: true
+    muted_mixup_fold_lambda: false
+    muted_mixup_hard_control: true
+
+  # ---- Ablation: does evaluating the MIXED affect location matter? ----
+  #
+  # uf4_softmix supervises with q(lam * v_a + (1 - lam) * v_b), the posterior
+  # AT the blended VAD point. This arm supervises with lam * q(v_a) +
+  # (1 - lam) * q(v_b), the two endpoints' own posteriors interpolated by the
+  # same lambda. Same fitted q, same blends, same lambda, same soft-target
+  # loss. Both targets are soft and both are VAD-derived, so a difference
+  # between them cannot be soft-versus-hard and cannot be "uses VAD": it can
+  # only be the nonlinearity of q along the segment joining the endpoints.
+  #
+  # Measured over 40,000 real MSP-Podcast blends, this is a TIGHT control.
+  # Against the blended-point target the endpoint target sits at median
+  # total-variation 0.084 with 82.5 percent argmax agreement, while vanilla
+  # mixup sits at 0.396 and 61.4 percent. So the endpoint arm keeps most of
+  # what separates our target from vanilla. Expect a small effect, and treat
+  # a null as underpowered rather than as evidence of no difference.
+  #
+  # Curiously the endpoint target is the SPREADER of the two: it puts
+  # meaningful mass on a third class in 5.1 percent of blends against 1.7 for
+  # the blended point, because averaging two posteriors cannot sharpen.
+  - <<: *template
+    name: "uf4_softmix_endpt"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_endpoint_posterior: true
+
+  # ---- GenLabel baseline (Sohn et al., ICML 2022, arXiv 2201.02354) ----
+  #
+  # The published alternative to our mechanism: relabel the mixed point by
+  # class-conditional generative densities, but fitted on the DATA rather
+  # than on an annotated affect space. Target is the normalised class
+  # likelihood at z_mix, with gamma weighting it against the vanilla mixup
+  # target; gamma = 1.0 is the pure GenLabel target, matching our arm's pure
+  # geometry target. This is the arm that decides whether the contribution is
+  # "relabel mixed points by a generative model" (already published) or
+  # "relabel them by an annotated affect geometry" (ours).
+  #
+  # use_proto_predictor stays on at weight 0.0 so the auxiliary head is
+  # constructed and the RNG stream matches the arms it is compared against.
+  # It contributes no gradient here, exactly as in uf4_softmix.
+  #
+  # Adaptations from the paper are documented in utils/genlabel.py. The one
+  # that changes behaviour most: in the raw 1024-d embedding the Gaussian log
+  # densities differ by thousands of nats, so the normalised label is one-hot
+  # in 100 percent of rows and GenLabel silently degenerates into HARD
+  # relabeling. A PCA to 64 dimensions, fitted from the same pooled
+  # accumulator, restores a usable posterior (mean max 0.70).
+  #
+  # NOTHING HERE IS TUNED. pca_dim and shrinkage are fixed a priori on the
+  # stated grounds above, not selected by any search on any split. The
+  # paper-faithful unreduced form runs as uf4_genlabel_raw, so the choice is
+  # reported as a pair rather than hidden inside a selection step.
+  - <<: *template
+    name: "uf4_genlabel"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 64
+    genlabel_shrinkage: 0.1
+    genlabel_tol: 0.0001
+
+  # ---- GenLabel exactly as published, no dimensionality adaptation ----
+  #
+  # Same arm with the authors' own settings: full 1024-d embedding, their
+  # cov + 1e-4 * I floor, no shrinkage, no projection. Expected to produce a
+  # near one-hot target and so to behave like a hard relabeling scheme. It
+  # runs so that the PCA choice in uf4_genlabel is visible as a choice rather
+  # than buried, and so that neither a favourable nor an unfavourable
+  # adaptation can be assumed.
+  - <<: *template
+    name: "uf4_genlabel_raw"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "MSPI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 0
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  # ---- VAD-derived soft labels WITHOUT mixup ----
+  #
+  # The control that decides whether mixup is part of the mechanism at all.
+  # Each real sample is supervised with q(v), the class posterior at its own
+  # annotated VAD point. No blending, no partner, no lambda.
+  #
+  # Why this is the decisive decomposition: the endpoint-posterior target
+  # lam * q(v_a) + (1 - lam) * q(v_b) is EXACTLY this relabeling followed by
+  # standard unmodified mixup, because mixup's label rule is linear and the
+  # two operations commute. Our own target q(lam * v_a + (1 - lam) * v_b)
+  # does not decompose that way, since q is nonlinear. So:
+  #   this arm wins            -> the contribution is VAD soft labels and
+  #                               mixup is decoration
+  #   endpoint wins, not this  -> soft labels need the blending to help
+  #   ours wins over both      -> evaluating the mixed affect location is
+  #                               doing something neither can express
+  #
+  # The target is far from the hard label: measured on 20,233 development
+  # rows it agrees with the annotated category on only 66.0 percent of rows
+  # and places a mean of 0.565 mass on it, so this is partial relabeling of
+  # the training set, not label smoothing.
+  - <<: *template
+    name: "uf4_vadsoft"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMO", "SAMSEMO", "IEMOFULL"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: false
+    use_vad_soft_labels: true
+    vad_soft_label_shuffle: false
+
+  # Placebo for the arm above. The soft labels are permuted WITHIN each
+  # class, so every sample still receives a soft label typical of its own
+  # class. Verified on the development split: identical mean entropy
+  # (0.7182), identical marginal, identical mean mass on the sample's own
+  # hard label (0.565), while 48.7 percent of rows receive a different
+  # argmax. Everything about the softness is preserved and only the
+  # per-sample correspondence to that sample's own affect annotation is
+  # destroyed, so a gain that survives here is not about VAD.
+  - <<: *template
+    name: "uf4_vadsoft_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: false
+    use_vad_soft_labels: true
+    vad_soft_label_shuffle: true
+
+  # ---- Control: is the mechanism just implicit class rebalancing? ----
+  #
+  # q uses UNIFORM class priors, which is not a neutral choice. Neutral is
+  # 45.3 percent of the fitting rows, so dropping the prior discounts it
+  # systematically: a neutral sample's target averages 0.407 on neutral
+  # against 0.601 once empirical priors are restored, and sad, at 10.7
+  # percent of the data, is inflated from 0.359 to 0.587. That is the same
+  # direction as the entire measured effect, every confusion-matrix row
+  # losing neutral mass, so "geometry" and "class rebalancing" currently
+  # predict the same thing.
+  #
+  # This arm restores the empirical priors and changes nothing else. If the
+  # gain survives it is geometry. If it vanishes we have been rediscovering
+  # class reweighting with extra steps, and this is the arm that says so.
+  - <<: *template
+    name: "uf4_softmix_prior"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_class_priors: true
+
+  # ---- Refinement: do not discard a certainty ----
+  #
+  # 32.7 percent of blends pair two samples of the SAME class, where the
+  # label is not in doubt: a blend of two sad utterances is sad. Vanilla
+  # mixup gets these exactly right at one-hot; our target places only 0.549
+  # mass on the correct label there, so a third of the training signal is
+  # spent unlearning something already known. This gates on parent
+  # agreement: one-hot when the parents share a class, q at the blended
+  # point otherwise. Mass on the true label rises from 0.504 to 0.647
+  # overall.
+  #
+  # The gate is a property of the pair, not a tuned threshold, so nothing
+  # is selected on any split. It should also help the endpoint arm, so it
+  # does not by itself settle whether the mixed-point evaluation matters.
+  - <<: *template
+    name: "uf4_softmix_gate"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_same_class_hard: true
+
+  # ---- Consensus-weighted trust in the annotated label ----
+  #
+  # q contradicts the categorical annotation on 33.6 percent of training
+  # rows. Measured on all 80,941 rows with annotator metadata, that
+  # disagreement tracks LABEL reliability and not VAD reliability:
+  # categorical consensus is 0.634 on disagreeing rows against 0.696 on
+  # agreeing ones, while annotator VAD dispersion is identical (0.787
+  # against 0.786). So there is no detectable "the VAD is wrong"
+  # population, only "the label is unreliable" and "genuinely atypical".
+  #
+  # The disagreement is also overwhelmingly a NEUTRAL problem: 48.4 percent
+  # of neutral rows disagree against 13.2 percent of angry, and neutral
+  # rows are about 65 percent of all disagreements. Neutral in VAD space is
+  # not a cluster, it is the absence of displacement, so a Gaussian fitted
+  # to it overlaps sad and happy heavily. That is the likely origin of the
+  # neutral recall loss this arm is meant to mitigate.
+  #
+  # Mechanism: let per-sample consensus decide how far the geometry may
+  # override the parents' labels.
+  #   c = lam*c_a + (1-lam)*c_b,  w = (1-c)/(1-c_min),
+  #   target = w*q(v_mix) + (1-w)*vanilla
+  # A blend of two unanimously annotated utterances keeps the vanilla
+  # target; one whose parents annotators argued about is labelled by where
+  # it lands. c_min is the smallest consensus on the fitting rows, so no
+  # tuned constant enters. 19.9 percent of rows have perfect consensus and
+  # fall back to vanilla entirely.
+  #
+  # Side effect worth noting: it also pulls the target marginal back toward
+  # the true class distribution, neutral 0.341 -> 0.415 against a true
+  # 0.453, and sad 0.199 -> 0.139 against 0.107.
+  #
+  # CAUTION: this damps average geometry strength to w mean 0.41, so it
+  # must be judged against the shuffled placebo below, which carries an
+  # IDENTICAL w distribution (verified: mean 0.4065, same quartiles), not
+  # against uf4_softmix.
+  - <<: *template
+    name: "uf4_softmix_trust"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_trust_target: true
+    muted_mixup_trust_shuffle: false
+
+  # Placebo. Consensus is permuted WITHIN each class, so every sample still
+  # receives a trust weight typical of its class and the distribution of w
+  # is bit-identical; only the correspondence between a sample and its own
+  # annotators' agreement is destroyed. A gain that survives here is not
+  # about consensus.
+  - <<: *template
+    name: "uf4_softmix_trust_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_trust_target: true
+    muted_mixup_trust_shuffle: true
+
+  # ---- Calibrated prior: stop over-suppressing neutral ----
+  #
+  # Uniform priors are the standard generative-classifier choice, but they
+  # are not calibrated to what training actually sees. Over 120,000 blends
+  # the target marginal injects neutral at 0.340 against a true 0.453 and
+  # sad at 0.195 against 0.107, an 83 percent over-weight. That aggregate
+  # skew is the neutral-recall loss at its origin, and on SAMSEMO it
+  # overshoots: the model there already UNDER-predicts neutral (41.3
+  # against a true 43.9), so pushing further moves the predicted
+  # distribution away from truth and accuracy goes flat.
+  #
+  # Empirical class priors are the obvious fix and are too blunt: they
+  # overshoot to neutral 0.510, disagree with the uniform-prior target's
+  # argmax on a quarter of blends, and removed the gain entirely.
+  #
+  # This solves instead for the log-prior offset under which the BLEND
+  # marginal matches the class distribution, by iterative proportional
+  # fitting at setup. Nothing is tuned. Measured: marginal L1 to truth
+  # 0.0000 (0.227 for uniform, 0.115 for empirical), while preserving 81
+  # percent of the per-sample argmax against 74 percent for empirical. It
+  # is seed-stable to +/-0.01 and generalises to held-out blend draws
+  # (L1 0.0026). Solved offset on MSP-Podcast is roughly
+  # [+0.32, +0.03, -0.77, -0.18], i.e. boost neutral, suppress sad.
+  #
+  # Known cost: third-class mass, the property only the mixed-point target
+  # can express, drops from 7.1 to 2.8 percent of blends. Calibration and
+  # that behaviour trade against each other.
+  - <<: *template
+    name: "uf4_softmix_cal"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_calibrated_prior: true
+
+  # ---- Fit the class Gaussians on high-agreement rows only ----
+  #
+  # Diagnosis this targets: neutral's posterior is capped at 0.541 even AT
+  # its own centroid, while angry reaches 0.958, happy 0.803 and sad 0.670.
+  # So the mixup branch cannot give neutral confident supervision at all:
+  # only 3.4 percent of blends carry a neutral target above 0.6, and of the
+  # blends whose argmax IS neutral, 0.3 percent exceed 0.7 confidence
+  # against 54 percent for happy and 57 percent for angry. Neutral recall
+  # falls because neutral never receives a sharp signal, not because mass
+  # is deliberately pushed away.
+  #
+  # The cause is the fitted covariance. 48.4 percent of neutral rows have
+  # VAD that contradicts their categorical label, against 13.2 percent of
+  # angry; those rows contribute VAD that summarises annotator disagreement
+  # rather than measuring the emotion, and they inflate neutral's scatter.
+  #
+  # Fitting on the top-quartile-agreement rows instead, measured:
+  #   neutral ceiling   0.541 -> 0.696      neutral-sad separation 0.165 -> 0.225
+  #   sad ceiling       0.670 -> 0.812      sad-angry separation   0.395 -> 0.499
+  #   blend marginal, neutral 0.339 -> 0.426 against a true 0.453
+  #   confident neutral blends (>0.6)  3.4% -> 34.7%
+  # The marginal moves toward truth as a SIDE EFFECT of sharper geometry,
+  # not by distorting the label, which is what separates this from
+  # uf4_softmix_prior and uf4_softmix_cal. Both of those corrected the
+  # marginal directly and removed the effect.
+  #
+  # PRIOR EVIDENCE IS AGAINST THIS. Consensus fitting has been tried four
+  # times (uf4_cons, cc_class, cc_vad, cc_lr5e6) and was flat to -0.5. But
+  # every one of those was an AUXILIARY-TASK arm: proto_predictor_weight
+  # 1.0, proto_target residual, mixup off. The aux head regresses a scalar
+  # from the centroids and never forms a posterior, so the 0.541 ceiling
+  # has no analogue there. No arm has ever combined mixup with
+  # consensus_q > 0.
+  #
+  # Known risk: the Gaussians are fitted on the high-agreement quartile but
+  # used to label blends drawn from ALL training rows, a fit/apply
+  # population mismatch. That may be why it underperformed in the aux
+  # context. Counter-evidence is that the blend marginal moves toward the
+  # true prior under filtering, not away.
+  #
+  # Falsifiable prediction: neutral recall should RISE against uf4_softmix.
+  # If it does not, the "neutral is under-supervised" diagnosis is wrong.
+  - <<: *template
+    name: "uf4_softmix_cons"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    proto_centroid_consensus_q: 0.75
+    proto_consensus_source: "class"
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  # ==== VAD-consistent mixup on the AUXILIARY target ====
+  #
+  # For a CONTINUOUS target, mixup is exactly correct rather than assumed:
+  # the blend of two utterances genuinely has the blended affect
+  # coordinates, and the whitevad target is an affine map of VAD, so the
+  # blended target equals the blend of the endpoint targets identically.
+  # None of the problems that afflict the categorical target apply -- no
+  # posterior, no 0.541 neutral ceiling, no marginal skew, no
+  # neutral/emotional trade.
+  #
+  # The constraint only exists with a NONLINEAR head. Verified numerically:
+  # with hidden_dim 0 the head is a bare linear map and
+  # |f(lam*z_a + (1-lam)*z_b) - (lam*f(z_a) + (1-lam)*f(z_b))| = 0.000000
+  # exactly, so the blend term collapses to a weaker copy of the endpoint
+  # loss. With hidden 256 the gap is 0.0415 and the term becomes a real
+  # structural prior: affect varies linearly along segments between
+  # training points in embedding space.
+  #
+  # Three arms, because the nonlinear head is itself a change from
+  # uf4_whitevad (hidden_dim 0). uf4_auxnl isolates the head; _mix adds the
+  # constraint; _mix_ctrl is the placebo. The decisive contrast is
+  # _mix minus _auxnl, with _mix_ctrl showing it is not just extra
+  # regression noise on synthetic points.
+
+  # Baseline for the new head: nonlinear aux VAD, no blend term.
+  - <<: *template
+    name: "uf4_auxnl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 256
+    use_muted_mixup: false
+    aux_vad_mixup: false
+
+  # The idea: the auxiliary head must map a blended embedding to the
+  # blended affect coordinates.
+  - <<: *template
+    name: "uf4_auxnl_mix"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 256
+    use_muted_mixup: false
+    aux_vad_mixup: true
+    aux_vad_mixup_weight: 1.0
+    aux_vad_mixup_alpha: 2.0
+    aux_vad_mixup_fold: true
+    aux_vad_mixup_shuffle: false
+
+  # Placebo. Identical blended embeddings and an identical DISTRIBUTION of
+  # blended targets, but the pairing between a blend and its target is
+  # permuted across the batch. Same loss scale, same synthetic points, same
+  # gradient path; the only thing removed is whether the target is the
+  # blend's OWN affect coordinate. A gain that survives here is not about
+  # affect consistency.
+  - <<: *template
+    name: "uf4_auxnl_mix_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 256
+    use_muted_mixup: false
+    aux_vad_mixup: true
+    aux_vad_mixup_weight: 1.0
+    aux_vad_mixup_alpha: 2.0
+    aux_vad_mixup_fold: true
+    aux_vad_mixup_shuffle: true
+
+  # ==== Auxiliary head learning rate ====
+  #
+  # The aux head is randomly initialised but trained at the trunk's
+  # fine-tuning rate, 5e-6. Evidence that this is wrong: a 1024-256-3 head
+  # reaches train MSE 0.543 while a 1024-3 head reaches 0.527 on the SAME
+  # target. More capacity fitting worse is an optimisation failure, not a
+  # capacity one, and it makes the nonlinear arms uninterpretable -- a
+  # linearity constraint on a map that cannot fit its own target tests
+  # nothing. For scale, learned_centroid_lr already defaults to 1e-3, 200x
+  # the rate the aux head gets.
+  #
+  # proto_predictor_lr defaults to config.learning_rate, so every existing
+  # arm and fingerprint is untouched; only these arms set it.
+
+  # Does the BEST aux arm we have improve with a properly trained head?
+  - <<: *template
+    name: "uf4_whitevad_lr"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 0
+    proto_predictor_lr: 1e-3
+    use_muted_mixup: false
+
+  # Is the nonlinear head actually worse once it can train?
+  - <<: *template
+    name: "uf4_auxnl_lr"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 256
+    proto_predictor_lr: 1e-3
+    use_muted_mixup: false
+    aux_vad_mixup: false
+
+  # The original question, now interpretable: does requiring the head to map
+  # a blended embedding to the blended affect coordinates help?
+  - <<: *template
+    name: "uf4_auxnl_mix_lr"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_hidden_dim: 256
+    proto_predictor_lr: 1e-3
+    use_muted_mixup: false
+    aux_vad_mixup: true
+    aux_vad_mixup_weight: 1.0
+    aux_vad_mixup_alpha: 2.0
+    aux_vad_mixup_fold: true
+    aux_vad_mixup_shuffle: false
+
+  # ==== Three remaining levers, in the agreed order ====
+  #
+  # Six mechanism variants have now failed to improve on uf4_softmix
+  # (empirical priors, calibrated offset, consensus fitting, same-class
+  # gate, consensus trust, aux VAD mixup), which is itself evidence the
+  # geometry target sits at its natural operating point. What is left is
+  # combination and budget, not refinement of the target rule.
+  #
+  # 3. aux VAD AND geometry mixup together. Never run: the mixup arms all
+  #    carry proto_predictor_weight 0.0. uf4_whitevad is the strongest
+  #    SAMSEMO arm we have (70.42 UAR / 68.49 acc) and acts on the encoder
+  #    during training, where the mixup target acts on synthetic points, so
+  #    redundancy is not the default expectation. The _ctrl arm is the
+  #    established pooled-shuffle aux placebo, so an additive gain can be
+  #    attributed to the aux SIGNAL rather than to the extra head.
+  # 2. More blends per real sample. The encoder pass is already paid for;
+  #    extra blends cost only a classifier-head pass. repeats=1 is verified
+  #    bit-identical to the previous behaviour.
+  # 1. Mixup loss weight, never varied from 0.5. Straightforward tuning,
+  #    reported as such.
+
+  - <<: *template
+    name: "uf4_softmix_aux"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_shuffle: false
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "uf4_softmix_aux_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 1.0
+    proto_predictor_shuffle: true
+    proto_shuffle_mode: "pool"
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "uf4_softmix_x2"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_repeats: 2
+
+  - <<: *template
+    name: "uf4_softmix_w025"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_muted_mixup: true
+    muted_mixup_weight: 0.25
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "uf4_softmix_w10"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    proto_predictor_shuffle: false
+    use_muted_mixup: true
+    muted_mixup_weight: 1.0
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  # ==== Per-modality mixup: blend the branches BEFORE fusion ====
+  #
+  # Every other arm blends the post-fusion embedding, so audio and text move
+  # together under one lambda. These blend the branch outputs separately,
+  # reaching points no joint blend can produce -- the audio of one utterance
+  # with mostly the text of another.
+  #
+  # THE TARGET IS AN APPROXIMATION HERE, unlike every other arm. With
+  # independent coefficients the blend is not lam*z_a + (1-lam)*z_b for any
+  # single lam, and cross-attention fusion is nonlinear, so the exact
+  # correspondence is gone. Annotations cannot supply the missing quantity
+  # either: a rater scored the utterance, not its modalities. The target
+  # uses an effective coefficient lam_eff = w*lam_audio + (1-w)*lam_text
+  # with w = 0.638, the audio branch's share of above-chance accuracy from
+  # the modality ablation (audio-only 64.4, text-only 47.4, chance 25). One
+  # global constant from an existing measurement, not a per-sample
+  # pseudo-label.
+  #
+  # Measured before running: the independent and joint targets differ by a
+  # median total variation of only 0.006, because averaging two lambda draws
+  # concentrates lam_eff. So the label is effectively held fixed and these
+  # arms test whether the CHIMERA INPUTS help, which is the cleaner reading.
+  #
+  # _ctrl shares one lambda across both modalities: algebraically the joint
+  # blend, routed through the same pre-fusion path. It isolates per-modality
+  # independence from the change of where the blend happens.
+
+  - <<: *template
+    name: "uf4_softmix_pm"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_per_modality: true
+    muted_mixup_modality_independent: true
+    muted_mixup_w_audio: 0.638
+
+  - <<: *template
+    name: "uf4_softmix_pm_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_per_modality: true
+    muted_mixup_modality_independent: false
+    muted_mixup_w_audio: 0.638
+
+  # ==== Blend ONE modality only ====
+  #
+  # uf4_softmix_pmaudio blends the audio branch and takes the text branch
+  # wholly from the source; uf4_softmix_pmtext is its mirror and serves as
+  # the contrast. Motivated by the modality ablation: audio-only reaches
+  # 64.4 percent against text-only 47.4 (chance 25), and text's entire
+  # contribution is +11 happy recall. So blending text may mostly inject
+  # noise while blending audio acts where the signal is.
+  #
+  # The effective coefficient becomes w*lam_audio + (1 - w) for audio_only,
+  # which leans the target on the source -- correct, since the text is
+  # entirely the source's. Measured lam_eff: audio_only mean 0.804,
+  # text_only 0.889, against 0.693 for a joint blend.
+  #
+  # Expectations should be low: the independent-lambda chimera arm lost to
+  # its own shared-lambda control by 0.69 / 0.44 UAR. These are milder
+  # chimeras (one branch intact rather than both mixed) but the same
+  # off-manifold concern applies, and the target remains an approximation.
+
+  - <<: *template
+    name: "uf4_softmix_pmaudio"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_per_modality: true
+    muted_mixup_modality_mode: "audio_only"
+    muted_mixup_w_audio: 0.638
+
+  - <<: *template
+    name: "uf4_softmix_pmtext"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_per_modality: true
+    muted_mixup_modality_mode: "text_only"
+    muted_mixup_w_audio: 0.638
+
+  # Seeds 1234 and 2024 for the endpoint-posterior ablation, taking it to
+  # n=5 to match the arms it is compared against. Config-identical to
+  # uf4_softmix_endpt apart from the seed list, verified key by key, so the
+  # two pool as one arm in analysis. A separate entry rather than an edited
+  # seeds list because seeds is part of the training fingerprint: extending
+  # the parent's list would mark its three finished seeds stale.
+  - <<: *template
+    name: "uf4_softmix_endpt_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_endpoint_posterior: true
+
+  # ==== Does longer training help, and does the gap survive it? ====
+  #
+  # Diagnosed on SAMSEMO: total error mass is identical between ours (32.69
+  # percent) and vanilla (32.70), so the method RELOCATES errors rather than
+  # reducing them there. It repairs happy->neutral by 0.56 points of the
+  # corpus and breaks neutral->happy by 0.46. Neutral and happy are 82.3
+  # percent of SAMSEMO and the second-closest pair in VAD space, and
+  # neutral+happy is the most common blend type at 25.9 percent, so nearly
+  # all the method's effort lands on one boundary where it is symmetric.
+  # Consistent with macro AUC being flat to slightly negative there: the
+  # ranking does not improve, only the operating point moves.
+  #
+  # Therefore no boundary-moving variant can raise SAMSEMO, which is what all
+  # seventeen tried so far have confirmed. The remaining route is better
+  # DISCRIMINATION, so: train twice as long. Synthetic-data methods often
+  # need longer to pay off, and the cosine schedule already anneals to
+  # num_epochs so extending it is clean.
+  #
+  # BOTH arms get the longer budget, because a change that lifts vanilla too
+  # tells us nothing about the gap. Two seeds each first.
+
+  - <<: *template
+    name: "uf4_softmix_e16"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189]
+    num_epochs: 16
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "uf4_softmix_vanilla_e16"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189]
+    num_epochs: 16
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  # ==== Prototype pull: blend each sample toward its own class centre ====
+  #
+  # Motivated by a measured association. Across 44 mixup runs the share of
+  # embedding variance that is WITHIN class correlates with UAR at
+  # r = -0.451 (p = 0.002): tighter classes go with better transfer. The same
+  # correlation is absent in the auxiliary family (r = +0.212, p = 0.26), so
+  # it is specific to this mechanism. Pooled over all 79 runs it washes out
+  # to r = -0.141 (p = 0.21) because the no-mixup baselines are both the
+  # loosest AND the worst, which is the confound the split controls for.
+  #
+  # Mechanism: an EMA of per-class embedding centroids, and each sample is
+  # blended toward its OWN class centroid with lambda folded to [0.5, 1].
+  # Both endpoints share a class, so the target is a plain one-hot and none
+  # of the geometry labelling machinery applies. A running centroid rather
+  # than a same-class partner because at batch size 16 a sad row (10.7
+  # percent of the pool) often has no same-class partner at all. Centroids
+  # are updated AFTER the loss so a sample is never pulled toward a target
+  # computed from its own current embedding.
+  #
+  # NOT NOVEL in itself: this is center loss (Wen et al. 2016) expressed as
+  # mixup. It is run as a COMPOSITION test, asking whether the geometry
+  # target still adds on top of prototype regularisation, not as a claim.
+  #
+  # Counter-evidence to weigh: uf4_softmix_gate made same-class blends
+  # one-hot and lost 0.53 UAR (p=0.002). That arm used RANDOM same-class
+  # partners, so if the pull works the active ingredient has to be the
+  # prototypicality of the target, not same-class blending as such.
+  #
+  # The _ctrl placebo pulls toward the class-agnostic mean of the centroids
+  # with the displacement RESCALED to the real pull's magnitude. Without
+  # rescaling the global mean sits far from any class centroid and moves
+  # samples 5.6x further, so the placebo would lose on intervention size
+  # rather than on class-specificity. Verified: displacement ratio 1.000,
+  # and it leaves own-class distance unchanged (2.831 vs 1.965).
+
+  - <<: *template
+    name: "uf4_softmix_pull"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    use_proto_pull: true
+    proto_pull_weight: 0.5
+    proto_pull_alpha: 2.0
+    proto_pull_momentum: 0.9
+    proto_pull_global: false
+
+  - <<: *template
+    name: "uf4_softmix_pull_ctrl"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    use_proto_pull: true
+    proto_pull_weight: 0.5
+    proto_pull_alpha: 2.0
+    proto_pull_momentum: 0.9
+    proto_pull_global: true
+
+  - <<: *template
+    name: "uf4_pull_only"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: false
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    use_proto_pull: true
+    proto_pull_weight: 0.5
+    proto_pull_alpha: 2.0
+    proto_pull_momentum: 0.9
+    proto_pull_global: false
+
+  # ==== Mixing RATIO: how many blends go toward the class centre ====
+  #
+  # Count-fixed, unlike uf4_softmix_pull which added a separate loss term on
+  # top. Here a fraction of blends simply have their partner replaced by the
+  # row's own class centroid, so the number of synthetic samples and the
+  # gradient scale are unchanged and the fraction is a genuine ratio.
+  # Verified: fraction 0.0 is bit-identical to the base arm.
+  #
+  # Both endpoints of the ratio are already measured at seed 42:
+  #   fraction 0.0  = uf4_softmix        IEMOCAP 65.23 UAR / SAMSEMO 69.80
+  #   fraction 1.0 ~= uf4_pull_only      IEMOCAP 62.55      / SAMSEMO 68.45
+  # Pull-only sits within 0.03 of the NO-MIXUP baseline on IEMOCAP and 0.78
+  # below it on SAMSEMO, so the ratio interpolates between a strong arm and a
+  # null one. It can only beat the base arm if the response is non-monotonic,
+  # which does happen with auxiliary terms but which nothing here predicts.
+  # Screening only: at one seed, with the base arm's sd of 0.95 UAR, a
+  # two-point sweep will produce a "winner" by noise, so anything that looks
+  # promising needs n=3 before it means anything.
+
+  - <<: *template
+    name: "uf4_softmix_r25"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_pull_fraction: 0.25
+    proto_pull_momentum: 0.9
+
+  - <<: *template
+    name: "uf4_softmix_r50"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_pull_fraction: 0.5
+    proto_pull_momentum: 0.9
+
+  # ==== GenLabel to n=5 ====
+  #
+  # GenLabel is the primary published comparator and the only arm we do not
+  # clearly beat: at n=3 the PCA-64 variant ties us on SAMSEMO UAR and beats
+  # us on CMUMOSEI UAR (-1.28, 0/3 seeds in our favour), while losing 1.5 to
+  # 3.1 points of accuracy on every corpus. It deserves the same n as our own
+  # arms before any claim rests on that comparison.
+  #
+  # Seeds 1234 and 2024, config-identical to the parents apart from the seed
+  # list, verified key by key, so the two entries pool as one arm. A separate
+  # entry rather than an edited seed list because seeds is part of the
+  # training fingerprint. test_datasets covers all three corpora so these
+  # runs need no later rescoring.
+
+  - <<: *template
+    name: "uf4_genlabel_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 64
+    genlabel_shrinkage: 0.1
+    genlabel_tol: 0.0001
+
+  - <<: *template
+    name: "uf4_genlabel_raw_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 0
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  # ==== THE PLACEBO for the geometry target ====
+  #
+  # Every other control changes what the target IS. This one keeps the target
+  # distribution exactly and destroys only its correspondence to the blend:
+  # finished targets are permuted among blends sharing a source label, so the
+  # marginal, the entropy and the per-class target distribution are identical.
+  # Verified on 4,000 real blends: marginal identical, entropy 0.8506 both,
+  # mean max 0.6206 both, mass on the source label 0.4970 both, while 99.9
+  # percent of rows receive a different target and 56.2 percent a different
+  # argmax.
+  #
+  # Why vanilla mixup does not already serve as this control: its target has
+  # entropy 0.39 against this method's 0.85 and can only place mass on the
+  # two parents' labels. Beating vanilla therefore does not rule out the
+  # possibility that any sufficiently diffuse soft target would do as well.
+  # Only a matched-distribution shuffle rules that out. If the gain survives
+  # here, the target's content is irrelevant and the mechanism reduces to
+  # label smoothing with an unusual shape.
+
+  - <<: *template
+    name: "uf4_softmix_shuf"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  # ==== Global Mixup (Xie et al., AAAI 2023, arXiv 2206.02734) ====
+  #
+  # The closest published method to ours in MOTIVATION. It states the same
+  # problem, that mixup's label "is simply combined from the labels of the
+  # original sample pairs without reasonable judgment, resulting in ambiguous
+  # labels", and relabels the blend from global relationships. The signal is
+  # what differs, and that is exactly the comparison worth making: Global
+  # Mixup reads structure out of the UNSUPERVISED feature space, ours reads
+  # it out of ANNOTATED affect space. GenLabel covers the generative-density
+  # branch of the same family; this covers the similarity-vote branch.
+  #
+  # Their equations 3-5 implemented directly: the blend's label is a softmax
+  # over gamma-scaled cosine similarities to every real sample in the batch,
+  # used to take a weighted vote over those samples' one-hot labels. Only
+  # blends whose vanilla label is overconfident (argmax >= theta) are
+  # relabelled; theta = 1/c relabels all of them, which needs no threshold
+  # chosen and matches our arm, which also labels every blend.
+  #
+  # Adaptations documented in utils/muted_mixup.py. The one that matters:
+  # the paper TUNES gamma over {1, 2, 4, 6}, and tuning here would mean
+  # selecting on test. Instead it is fixed a priori at 4, because at that
+  # value the target's entropy (0.858) matches our own target's (0.851), so
+  # the comparison isolates what the target SAYS rather than how sharp it
+  # is. gamma = 1 runs as the sensitivity check at the paper's low end,
+  # where the target is nearly uniform (entropy 1.340 against a maximum of
+  # 1.386). Same two-setting treatment GenLabel received.
+
+  - <<: *template
+    name: "uf4_globalmix"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_global_mixup: true
+    global_mixup_gamma: 4.0
+
+  - <<: *template
+    name: "uf4_globalmix_g1"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_global_mixup: true
+    global_mixup_gamma: 1.0
+
+  # ==== Seeds 1234 and 2024 for the placebo and the Global Mixup arms ====
+  #
+  # These three were created at n=3 while our method and vanilla sit at n=5.
+  # That is the wrong way round. At seed 42 the placebo captured most of the
+  # gain over vanilla (IEMOCAP accuracy +0.72 of +0.80), leaving an
+  # ours-minus-placebo residual of +0.73 / +0.36 / -0.27 UAR across the three
+  # corpora -- inside the 0.95 seed sd and inconsistent in sign. A residual
+  # that small is exactly where power matters most, so the placebo needs n=5
+  # at least as much as the method does. Global Mixup is the other member of
+  # the relabelling family and deserves the same footing.
+  #
+  # Config-identical to their parents apart from name and seeds, verified
+  # key by key, so each pair pools as one arm.
+
+  - <<: *template
+    name: "uf4_softmix_shuf_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  - <<: *template
+    name: "uf4_globalmix_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_global_mixup: true
+    global_mixup_gamma: 4.0
+
+  - <<: *template
+    name: "uf4_globalmix_g1_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_global_mixup: true
+    global_mixup_gamma: 1.0
+
+  # ==== The VAD-FREE control ====
+  #
+  # The shuffled ablation showed that a target need not describe its own
+  # blend: at n=5 ours minus shuffled is +0.002 accuracy and +0.009 macro F1
+  # averaged over the three corpora. But that control still DRAWS its targets
+  # from q, so it still requires the VAD annotations. This asks the harder
+  # question: does the target need to come from VAD at all?
+  #
+  # Targets are sampled from a Dirichlet fitted, per source class, to match
+  # q's class-conditional mean and entropy. Verified against q on 20,000 real
+  # blends: entropy 0.8489 against 0.8466, mean max 0.6242 against 0.6221,
+  # marginal L1 0.0007, class-conditional means agreeing to three decimals,
+  # and the same correlation with the true target as the shuffled control
+  # (0.437 against 0.433), which is the correlation class structure alone
+  # induces. No affect information about any blend survives.
+  #
+  #   Dirichlet ~ shuffled ~ ours  -> VAD is unnecessary here; the finding is
+  #       that class-conditional high-entropy targets improve mixup, and the
+  #       affect machinery earns nothing.
+  #   shuffled > Dirichlet         -> q's target FAMILY matters even though
+  #       the per-blend correspondence does not.
+  #
+  # It cannot rescue the per-blend claim, which is already settled.
+
+  - <<: *template
+    name: "uf4_softmix_dir"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_dirichlet: true
+
+  - <<: *template
+    name: "uf4_softmix_dir_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: [IEMOFULL, SAMSEMO, CMUMOSEI]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_dirichlet: true
+
+  # ==== Within-corpus IEMOCAP replication (session-independent CV) ====
+  #
+  # Every arm above trains on MSP-Podcast and evaluates zero-shot, which is
+  # the harder protocol but makes our numbers incomparable to the published
+  # SER literature. Wang et al. (EAM, arXiv 2512.04551) report 79.14 percent
+  # UA on exactly the subset we call IEMOFULL: 'exc' merged into 'hap' giving
+  # 5,531 utterances over four classes (happy 1,636, angry 1,103, sad 1,084,
+  # neutral 1,708), scored by 5-fold session-independent cross-validation.
+  # Our IEMOFULL loader reproduces those counts exactly, so the only thing
+  # standing between us and a comparable number is the protocol.
+  #
+  # heldout_session: N trains on the other four sessions and evaluates on
+  # session N. Each session holds exactly two speakers, so the fold is
+  # speaker-disjoint and condition-disjoint by construction. The held-out
+  # session is the validation split AND the reported evaluation set, which is
+  # only sound because model_selection is swa_last_n: the reported model
+  # averages the final epochs, so no epoch is chosen using the scored rows.
+  # Do not set use_early_stopping or a best-epoch selection on these arms.
+  #
+  # test_datasets names the training corpus on purpose, which resolves to NO
+  # cross-corpus evaluation at all: create_datasets drops any training corpus
+  # from the test list, leaving it empty. Do NOT write an empty list here
+  # instead, because create_datasets reads an empty test list as "evaluate on
+  # every registered corpus" and would load the whole dataset map, MSPI
+  # included. Naming IEMOFULL also keeps the cache key stable, since the
+  # finished-run check compares the requested list as written.
+  #
+  # The evaluation set under this protocol is the held-out session, which
+  # arrives through the validation path rather than the test path.
+  #
+  # Pilot only. The training pool is 4,425 rows against MSP-Podcast's 60,708,
+  # so the 8-epoch budget above is roughly a fourteenth of the optimisation.
+  # This arm runs one fold of the no-mixup baseline over a long budget to see
+  # where the held-out curve settles, so a single epoch count can be fixed
+  # for every comparison arm before any of them runs. It is a feasibility
+  # check, not a tuning step: the budget is chosen once, shared by all arms,
+  # and no arm's reported number is selected from its own curve.
+  - <<: *template
+    name: "cv_pilot"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 1
+    num_epochs: 32
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    use_proto_predictor: false
+    class_weight_mode: "sqrt_inverse_freq"
+
+  # ==== Within-corpus IEMOCAP comparison arms (5-fold session CV) ====
+  #
+  # The four arms that matter, replicated under the published protocol so our
+  # numbers sit beside the SER literature instead of only beside each other.
+  # The cv_pilot curve above plateaus from epoch 9 and stays flat through 32
+  # with no held-out collapse, so the budget is fixed at 24 epochs for every
+  # arm: inside the plateau for the baseline, with headroom for the mixup
+  # arms, which regularise and converge more slowly. Fixed once here, before
+  # any comparison arm ran, and never re-chosen per arm.
+  #
+  # One seed (42) per fold. Variance comes from the five folds, which is how
+  # the protocol is reported, and contrasts are paired by fold exactly as the
+  # cross-corpus contrasts are paired by seed.
+  #
+  # Arms mirror their MSP-Podcast counterparts key for key:
+  #   cv_base  = uf4_base            no mixup
+  #   cv_van   = uf4_softmix_vanilla lambda-interpolated target
+  #   cv_ours  = uf4_softmix         q(v_mix), the geometry target
+  #   cv_shuf  = uf4_softmix_shuf    placebo, targets permuted within class
+  #
+  # See cv_pilot above for why test_datasets names the training corpus.
+
+  # no mixup
+  - <<: *template
+    name: "cv_base_f1"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 1
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+  - <<: *template
+    name: "cv_base_f2"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 2
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+  - <<: *template
+    name: "cv_base_f3"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 3
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+  - <<: *template
+    name: "cv_base_f4"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 4
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+  - <<: *template
+    name: "cv_base_f5"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 5
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+
+  # vanilla mixup, lambda-interpolated target
+  - <<: *template
+    name: "cv_van_f1"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 1
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "cv_van_f2"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 2
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "cv_van_f3"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 3
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "cv_van_f4"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 4
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "cv_van_f5"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 5
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+
+  # geometry target q(v_mix)
+  - <<: *template
+    name: "cv_ours_f1"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 1
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "cv_ours_f2"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 2
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "cv_ours_f3"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 3
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "cv_ours_f4"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 4
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "cv_ours_f5"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 5
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+
+  # placebo, targets permuted within source class
+  - <<: *template
+    name: "cv_shuf_f1"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 1
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  - <<: *template
+    name: "cv_shuf_f2"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 2
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  - <<: *template
+    name: "cv_shuf_f3"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 3
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  - <<: *template
+    name: "cv_shuf_f4"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 4
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  - <<: *template
+    name: "cv_shuf_f5"
+    train_dataset: ["IEMOFULL"]
+    test_datasets: ["IEMOFULL"]
+    heldout_session: 5
+    num_epochs: 24
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+
+  # ==== Encoder generalisation: WavLM Large instead of emotion2vec ====
+  #
+  # Does the geometry target depend on emotion2vec specifically? Every arm
+  # above sits on emotion2vec, whose pretraining is emotion-specific, so a
+  # sceptic can argue the mechanism rides on that one encoder.
+  #
+  # These arms swap in WavLM Large, the encoder EAM (arXiv 2512.04551) uses
+  # for its best IEMOCAP row. The point is NOT to compare scores with EAM:
+  # our contribution is the mixup target, theirs is a whole system (WavLM
+  # Large plus their mixup plus FLAM aggregation plus a four-term loss), so
+  # system-vs-system numbers say nothing about mixup. The point is that
+  # their FEATURES are a genuinely different representation, and if ours
+  # still beats vanilla on top of them, the mechanism is not encoder-bound.
+  #
+  # Protocol is unchanged: train on MSP-Podcast, evaluate zero-shot on the
+  # three corpora. Comparisons stay WITHIN the encoder (wl4_ours vs wl4_van
+  # vs wl4_base), never across encoders, so the encoder's own strength and
+  # its 4096 fused width are held constant and cannot carry a contrast.
+  #
+  # Note audio_pooling "frames" routes WavLM through the same AttentionPool
+  # emotion2vec uses, so the time axis is not a confound. WavLM Large frames
+  # are 1024 wide against emotion2vec's 768, which the pooler now reads from
+  # the encoder rather than assuming; a hardcoded 768 used to reject Large
+  # outright. The 768 encoders are unaffected by that fix.
+
+  # no mixup, WavLM Large reference
+  - <<: *template
+    name: "wl4_base"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-large"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+
+  # vanilla mixup, lambda-interpolated target
+  - <<: *template
+    name: "wl4_van"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-large"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+
+  # geometry target q(v_mix)
+  - <<: *template
+    name: "wl4_ours"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-large"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+
+  # ==== Encoder generalisation, WavLM base-plus (the practical variant) ====
+  #
+  # Same question as the wl4_* arms above: does the geometry target depend on
+  # emotion2vec specifically? Same answer structure, a cheaper encoder.
+  #
+  # WavLM Large measured 64 minutes an epoch and 8h30m a run on the full
+  # MSP-Podcast pool, so nine runs would have cost three days. base-plus is
+  # 12 layers of 768 against Large's 24 of 1024, roughly a quarter of the
+  # compute, and it answers the question just as well: it carries no
+  # emotion-specific pretraining, so it is a genuinely different
+  # representation from emotion2vec. Matching EAM's exact checkpoint only
+  # mattered while we thought we were comparing scores with them, and we are
+  # not: our contribution is the mixup target, theirs is a whole system.
+  # wl4_base_seed42 survives on disk as a Large spot-check.
+  #
+  # Gradient checkpointing is OFF here, inherited from the template. The
+  # wav2vec2/wavlm encoder used to force it on regardless of config, unlike
+  # the emotion2vec path; it is now opt-out. Checkpointing is mathematically
+  # equivalent and excluded from the fingerprint, and gradient flow was
+  # verified identical either way (19 of 19 tensors per unfrozen layer
+  # receive nonzero gradient with it on and with it off), so this buys wall
+  # time without changing what is computed.
+  #
+  # Contrasts stay WITHIN the encoder. Never compare these absolute scores
+  # against the emotion2vec arms or against wl4_*: encoder, pretraining
+  # objective and fused width would all differ at once.
+
+  # no mixup, WavLM base-plus reference
+  - <<: *template
+    name: "wb4_base"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+
+  # vanilla mixup, lambda-interpolated target
+  - <<: *template
+    name: "wb4_van"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+
+  # geometry target q(v_mix)
+  - <<: *template
+    name: "wb4_ours"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+
+  # placebo, targets permuted within source class
+  - <<: *template
+    name: "wb4_shuf"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO", "CMUMOSEI"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+
+  # Seeds 1234 and 2024 for the WavLM base-plus arms, taking them from three
+  # to five to match the emotion2vec arms. These are SEPARATE arm blocks
+  # rather than extra entries in the parent arms' seed lists because
+  # config.seeds is part of the training fingerprint: appending a seed there
+  # would mark the three finished runs stale and retrain them. Everything
+  # else is copied from the parent verbatim, so analysis pools wb4_x with
+  # wb4_x_more exactly as it pools uf4_softmix with uf4_softmix_more.
+  #
+  # CMU-MOSEI is dropped from test_datasets here. It is no longer reported
+  # (1938 usable rows, and its modality ablation puts audio-only below
+  # text-only), and test_datasets is excluded from the fingerprint, so the
+  # parent and the _more arm still pool correctly.
+  - <<: *template
+    name: "wb4_base_more"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: false
+
+  - <<: *template
+    name: "wb4_van_more"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_vanilla_target: true
+
+  - <<: *template
+    name: "wb4_ours_more"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+
+  - <<: *template
+    name: "wb4_shuf_more"
+    audio_encoder_type: "wavlm"
+    audio_model_name: "microsoft/wavlm-base-plus"
+    audio_pooling: "frames"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: true
+    muted_mixup_target_shuffle: true
+
+  # ==================================================================
+  # Queue 118. Two things the GenLabel row cannot settle on its own.
+  # ==================================================================
+  #
+  # A. SPACE-MATCHED CONTROL (uf4_genlabel_pca3).
+  #
+  # The question our placebo and shuffle arms do NOT answer: is the gain
+  # because VAD is the right space, or because fitting class-conditional
+  # Gaussians and relabelling by their posterior helps at all? Those arms
+  # remove or scramble affect content; neither substitutes a LEARNED geometry
+  # of the same size.
+  #
+  # This arm matches our method on every component except the space:
+  #   same pairs, same folded Beta(2,2) lambda, same blends
+  #     (genlabel_mixup_step duplicates general_soft_mixup_step's pairing)
+  #   same density family: empirical per-class mean and covariance
+  #   same ridge: tol 1e-4 equals the cov + 1e-4 * I in class_vad_stats
+  #   same shrinkage: none
+  #   same dimensionality: 3
+  #   same rule: normalised posterior, uniform priors
+  #   same loss weight: muted_mixup_weight 0.5
+  # The ONLY difference is that the Gaussians are fitted on a PCA-3 projection
+  # of the learned fusion embedding instead of on annotated VAD.
+  #
+  # ONE CONFOUND WE CANNOT REMOVE, and must state in the paper rather than
+  # claim away: our VAD Gaussians are fitted ONCE before training and are
+  # static, because annotations do not move. Embeddings do move, so the
+  # PCA-3 densities are refitted at every epoch boundary and epoch 1 trains
+  # on the vanilla target during warmup. That difference is forced by the
+  # space and is not a free choice, but it is a difference.
+  #
+  # shrinkage 0.0 and not the 0.1 of uf4_genlabel: in 3 dimensions with
+  # roughly 15k training rows per class the covariance is well conditioned,
+  # so shrinkage would be an unmatched extra regulariser.
+  #
+  # WHY proj_mode lda AND NOT THE PCA-64 ARM'S BASIS. uf4_genlabel keeps the
+  # top eigenvectors of the pooled WITHIN-class covariance, which are the
+  # directions of greatest spread inside each class rather than the
+  # directions that separate the classes. Measured on synthetic data whose
+  # class signal occupies 3 directions under larger nuisance variance, that
+  # basis at 3 dimensions gives a mean top posterior of 0.259 against the
+  # uniform 0.25, an entropy of 1.3856 against the maximum 1.3863, and an
+  # argmax that matches the source class on 26.1 percent of blends, which is
+  # chance. It carries no class information at all, so an arm built on it
+  # would lose for want of capacity and would say nothing about the space.
+  # LDA on the same data gives 0.7259, entropy 0.6848 and 71.8 percent, and
+  # its 0.6848 is close to this method's own 0.850, so the two targets are
+  # comparable in softness. LDA also returns exactly num_classes - 1 = 3
+  # directions for four classes, so the dimensionality is forced by the
+  # class count rather than chosen to match VAD.
+  - <<: *template
+    name: "uf4_genlabel_lda3"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 3
+    genlabel_proj_mode: "lda"
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  # Seeds 4 and 5 of the space-matched control. Separate arm because
+  # config.seeds is part of the training fingerprint (runner.py:196), so
+  # appending seeds to the arm above would mark its finished runs stale and
+  # retrain them.
+  - <<: *template
+    name: "uf4_genlabel_lda3_more"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [1234, 2024]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 1.0
+    genlabel_pca_dim: 3
+    genlabel_proj_mode: "lda"
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  # B. GAMMA PROBES for the published GenLabel recipe.
+  #
+  # The authors cross-validate gamma over {0, 0.2, 0.4, 0.6, 0.8, 1.0} in
+  #   gamma * CE(f(x_mix), t_gen) + (1 - gamma) * CE(f(x_mix), t_vanilla).
+  # Every GenLabel arm we have run pins gamma at 1.0, the most aggressive
+  # point on that grid, which is also the only point at which the one-hot
+  # saturation of the unreduced 1024-d density reaches the loss undiluted.
+  # Reporting that configuration as "GenLabel as published" attributes to
+  # their method a failure caused by our own choice of gamma.
+  #
+  # These two probes plus the existing uf4_genlabel_raw seed 42 give three
+  # points on the grid at one seed. Selection is on the MSP-Podcast
+  # DEVELOPMENT split, read from the heldout.npz dump each run already
+  # writes, never on any test corpus. The winner is then run at five seeds.
+  #
+  # gamma 0.0 is not probed: it is vanilla mixup by construction and already
+  # exists as uf4_softmix_vanilla.
+  - <<: *template
+    name: "uf4_genlabel_raw_g02"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 0.2
+    genlabel_pca_dim: 0
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  - <<: *template
+    name: "uf4_genlabel_raw_g06"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: "5e-6"
+    seeds: [42]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    use_proto_predictor: true
+    proto_target: "whitevad"
+    proto_predictor_weight: 0.0
+    use_muted_mixup: true
+    muted_mixup_weight: 0.5
+    muted_mixup_alpha: 2.0
+    muted_mixup_general_soft: false
+    use_genlabel: true
+    genlabel_gamma: 0.6
+    genlabel_pca_dim: 0
+    genlabel_shrinkage: 0.0
+    genlabel_tol: 0.0001
+
+  # ======================================================================
+  # Direction-aware soft labels on REAL samples
+  # ======================================================================
+  #
+  # A different vehicle from the mixup arms above. Those label synthetic
+  # blends, which have no annotators, so they need a labelling function over
+  # VAD space and inherit everything that function gets wrong: the uniform
+  # prior returns sad 0.80 at VAD (3,3,3) where annotators say neutral 0.54,
+  # happy 0.42, sad 0.04. Real samples need no such function. Their
+  # annotator distribution is measured, and these arms use it directly.
+  #
+  # What is measured and what is new. Five annotators splitting three to two
+  # tells you the panel disagreed, not whether the utterance genuinely sits
+  # between two emotions or the annotators were unreliable about that
+  # distinction; both read the same way. The direction of the split
+  # separates them. analysis/vad_label_conflict.py measures, per region of
+  # VAD space and per label pair, how much of that confusion survives
+  # correction for annotation noise, and alpha is the share of a given
+  # panel's own disagreement running along axes that are real where it sits.
+  #
+  # Measured on the official Train split: 81.9 percent of panel
+  # disagreement runs along axes with no local structure, and 70.5 percent
+  # of split panels are mostly noise-axis. Neutral/happy realness ranges
+  # 0.00 to 0.93 across cells, so the regional conditioning carries the
+  # mechanism: a single global constant per label pair correlates with the
+  # per-utterance verdict at only 0.115 and flips 60.3 percent of them.
+  #
+  # Split. These arms use the corpus's official Train/Development split
+  # (val_split_official), unlike every arm above, which merges the two and
+  # carves validation at random. Required here because the realness map is
+  # fitted on training labels, so a merged pool would let validation rows
+  # influence training targets through their own labels. It costs 46 percent
+  # of the angry four-class rows, which is why results here are NOT
+  # comparable to the mixup table and need their own baseline, below.
+  #
+  # Build the map first:
+  #   python -m analysis.build_realness_map
+
+  # Baseline. Hard majority labels on the official split, no levers. Exists
+  # because the official split makes every other arm in this file an invalid
+  # reference.
+  - <<: *template
+    name: "rl_hard"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+
+  # Trusts every panel equally. This is the comparison the claim rests on:
+  # beating hard labels alone would only show that soft labels help, which
+  # is already known. Selective trust has to beat indiscriminate trust.
+  - <<: *template
+    name: "rl_raw"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "raw"
+
+  # Both levers. The target keeps a panel's ambiguity along locally real
+  # axes and collapses it along noise axes; the loss weight gives a
+  # noise-axis row less influence, floored so its majority label and its
+  # audio still contribute.
+  - <<: *template
+    name: "rl_dir"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "realness"
+    realness_loss_weight: true
+    realness_weight_floor: 0.25
+
+  # Placebo. Identical to rl_dir except the realness values are permuted
+  # across VAD cells, each label pair keeping its corpus-average value. So
+  # the targets are as soft on average (mean alpha 0.145 against 0.128) and
+  # a panel split on neutral/happy still earns more trust than one split on
+  # happy/angry. The ONLY thing removed is the claim that trust belongs in
+  # particular places. If rl_dir does not beat this, the regional map is
+  # decoration.
+  - <<: *template
+    name: "rl_dir_placebo"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "realness"
+    realness_loss_weight: true
+    realness_weight_floor: 0.25
+    realness_placebo: true

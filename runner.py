@@ -178,6 +178,9 @@ def _run_or_load(config, datasets):
     return train(config, datasets=datasets)
 
 
+ONLY_SEEDS = set()
+
+
 def run_with_seeds(config, datasets=None):
     """
     Run experiment with multiple seeds and compute averaged results.
@@ -187,6 +190,22 @@ def run_with_seeds(config, datasets=None):
 
     if isinstance(seeds, (int, float)):
         seeds = [int(seeds)]
+
+    # Optional subset filter, for screening one seed across several arms
+    # before committing to the full set. This deliberately does NOT mutate
+    # config.seeds: that key is part of the training fingerprint, so
+    # rewriting it would mark every already-finished run of this arm stale
+    # and trigger a retrain. Only the iteration order is affected, and the
+    # per-run fingerprint still carries the scalar config.seed.
+    if ONLY_SEEDS:
+        keep = [s for s in seeds if int(s) in ONLY_SEEDS]
+        skipped = [s for s in seeds if int(s) not in ONLY_SEEDS]
+        if not keep:
+            print(f"   --only-seeds {sorted(ONLY_SEEDS)} matches none of "
+                  f"{seeds}; nothing to run")
+            return None
+        print(f"   --only-seeds active: running {keep}, deferring {skipped}")
+        seeds = keep
 
     if len(seeds) == 1:
         config.seed = seeds[0]
@@ -473,12 +492,20 @@ def run_all_experiments(yaml_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run emotion recognition experiments")
+    parser.add_argument('--only-seeds', type=int, nargs='+', default=None,
+                        help='Run only these seeds from the config seed list. '
+                             'Does not change the config fingerprint, so the '
+                             'remaining seeds can be run later without '
+                             'invalidating the ones already done.')
     parser.add_argument('--config', type=str, required=True, help='Path to config YAML')
     parser.add_argument('--experiment', '-e', type=str, default=None,
                         help='Experiment ID/name/index for multi-experiment configs')
     parser.add_argument('--all', '-a', action='store_true',
                         help='Run all experiments in a multi-experiment config')
     args = parser.parse_args()
+
+    if args.only_seeds:
+        globals()['ONLY_SEEDS'] = {int(x) for x in args.only_seeds}
 
     if args.all:
         run_all_experiments(args.config)

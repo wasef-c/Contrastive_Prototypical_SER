@@ -3,6 +3,7 @@
 Simplified emotion dataset loader for cross-corpus experiments
 """
 
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from utils.frame_cache import (
     write_frame_cache,
 )
 from utils.prototypicality import calculate_difficulty
+from utils.realness import load_realness
 from utils.config import RAW_AUDIO_ENCODERS
 
 
@@ -66,6 +68,75 @@ def _encoder_cache_path(dataset_name: str, encoder_type: str, model_name: str,
     return (AUDIO_FEATURE_CACHE_DIR / fname).resolve()
 
 
+def transcript_fingerprint(transcripts) -> str:
+    """Stable hash of a corpus's reference transcripts, in dataset order.
+
+    ASR transcripts are stored positionally rather than keyed by utterance
+    id, because not every corpus here exposes a stable id and the dataset
+    build applies label and VAD filtering that an id-keyed file would not
+    see. Positional storage is only safe if a change in that filtering is
+    detectable, which is what this hash is for: it is written beside the ASR
+    text and re-checked on load, so a reordered or refiltered corpus fails
+    loudly instead of silently pairing audio with the wrong sentence.
+
+    Args:
+        transcripts: reference transcripts in dataset order.
+
+    Returns:
+        Hex digest over the newline-joined transcripts.
+    """
+    joined = "\n".join("" if t is None else str(t) for t in transcripts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def load_asr_transcripts(asr_dir, dataset_name, reference):
+    """Swap reference transcripts for ASR output, verifying alignment.
+
+    Returns the reference unchanged when no ASR file exists for this corpus,
+    so a config may name a directory covering only the evaluation corpora.
+
+    Args:
+        asr_dir: directory holding <CORPUS>.npz files from
+            analysis/make_asr_transcripts.py.
+        dataset_name: corpus key, used as the file stem.
+        reference: reference transcripts in dataset order.
+
+    Returns:
+        List of ASR transcripts in dataset order.
+
+    Raises:
+        ValueError: if the row count or the reference fingerprint disagrees
+            with what was stored, which means the rows would not line up.
+    """
+    path = Path(asr_dir) / ("%s.npz" % dataset_name)
+    if not path.exists():
+        print("  ASR transcripts: none at %s, keeping reference text" % path)
+        return reference
+
+    blob = np.load(path, allow_pickle=True)
+    text = [str(t) for t in blob["text"]]
+    if len(text) != len(reference):
+        raise ValueError(
+            "ASR transcripts for %s hold %d rows but the corpus built %d. "
+            "Regenerate with analysis/make_asr_transcripts.py."
+            % (dataset_name, len(text), len(reference)))
+
+    stored = str(blob["ref_fingerprint"])
+    actual = transcript_fingerprint(reference)
+    if stored != actual:
+        raise ValueError(
+            "ASR transcripts for %s were generated against a different "
+            "build of the corpus (reference fingerprint %s, now %s), so the "
+            "rows would not line up. Regenerate with "
+            "analysis/make_asr_transcripts.py."
+            % (dataset_name, stored, actual))
+
+    model = str(blob["model"]) if "model" in blob else "unknown"
+    print("  ASR transcripts: %s rows from %s, replacing reference text"
+          % (len(text), model))
+    return text
+
+
 class EmotionDataset(Dataset):
     """
     Simplified dataset for cross-corpus emotion recognition
@@ -82,6 +153,12 @@ class EmotionDataset(Dataset):
     # Dataset mappings (preextracted Emotion2Vec features)
     DATASET_MAP = {
         "IEMO": "cairocode/IEMO_Audio_Text_Merged",
+        # Full IEMOCAP under the standard 4-class protocol, which merges
+        # excited into happy. "IEMO" above is the excited-EXCLUDED subset
+        # (4,490 rows, happy 595); this is the comparable-to-literature
+        # 5,531 rows with happy at 1,636. Kept as a separate key so the
+        # older results stay reproducible.
+        "IEMOFULL": "cairocode/iemocap",
         "MSPI": "cairocode/MSPI_Audio_Text_Merged",
         # "MSPP": "cairocode/MSPP_Audio_Text_Merged",
         # "CMUMOSEI": "cairocode/CMUMOSEI_Emotion2Vec_PrecomputedEncodings",
@@ -115,7 +192,17 @@ class EmotionDataset(Dataset):
     EMOCLASS_TO_LABEL = {"N": 0, "H": 1, "S": 2, "A": 3}
 
     # Datasets that have VAD annotations (for regression and prototypicality)
-    DATASETS_WITH_VAD = {"IEMO", "MSPI", "MSPP"}
+    DATASETS_WITH_VAD = {"IEMO", "IEMOFULL", "MSPI", "MSPP"}
+
+    # Corpora published as per-session splits rather than train/test. All
+    # sessions are concatenated; speaker-disjoint folds come from speaker_id.
+    SESSION_SPLIT_DATASETS = {
+        "IEMOFULL": ("session1", "session2", "session3", "session4", "session5"),
+    }
+
+    # String class name -> integer label, for corpora that ship a named
+    # 4-class column instead of an integer one.
+    EMONAME_TO_LABEL = {"neutral": 0, "happy": 1, "sad": 2, "angry": 3}
 
     # Corpora whose official train/validation splits are merged into one
     # training pool. Only safe when the corpus is never used for evaluation.
@@ -179,6 +266,14 @@ class EmotionDataset(Dataset):
                                else concatenate_datasets(parts))
             print(f"  Merged {len(parts)} splits for {dataset_name}: "
                   f"{[len(p) for p in parts]} -> {len(self.hf_dataset)} rows")
+        elif dataset_name in self.SESSION_SPLIT_DATASETS:
+            parts = [load_dataset(dataset_path, split=sub,
+                                  trust_remote_code=True)
+                     for sub in self.SESSION_SPLIT_DATASETS[dataset_name]]
+            self.hf_dataset = concatenate_datasets(parts)
+            print(f"  Concatenated {len(parts)} session splits for "
+                  f"{dataset_name}: {[len(p) for p in parts]} -> "
+                  f"{len(self.hf_dataset)} rows")
         else:
             self.hf_dataset = load_dataset(dataset_path, split=split,
                                            trust_remote_code=True)
@@ -208,6 +303,11 @@ class EmotionDataset(Dataset):
 
         all_labels = first_col(["label"])
         all_emoclass = first_col(["EmoClass"])
+        # Corpora shipping a named 4-class column. Rows outside the four
+        # classes carry None here and are skipped by the label check below,
+        # which is how the 4,508 xxx/frustrated/surprised rows in full
+        # IEMOCAP are dropped.
+        all_emoname = first_col(["emotion_4class"])
 
         # Collapse to neutral vs emotional when the arm is a presence detector.
         binary_neutral = bool(getattr(config, "binary_neutral", False))
@@ -237,7 +337,8 @@ class EmotionDataset(Dataset):
         # (e.g. MSPI uses valence/arousal/domination, CMUMOSEI/SAMSEMO use
         # consensus_*, MSPP uses EmoVal/EmoAct/EmoDom).
         all_val = first_col(["valence", "consensus_valence", "EmoVal"])
-        all_act = first_col(["arousal", "consensus_arousal", "EmoAct"])
+        all_act = first_col(["arousal", "activation", "consensus_arousal",
+                             "EmoAct"])
         all_dom = first_col(["dominance", "domination", "consensus_dominance", "EmoDom"])
 
         # Speaker identity, named differently per corpus: MSP-Podcast uses
@@ -247,6 +348,13 @@ class EmotionDataset(Dataset):
         # than collapsing every row into one bogus speaker.
         all_speakers = first_col(["SpkrID", "speakerID", "speaker_id", "speaker"],
                                  default=None)
+
+        # The corpus's own split assignment, where it ships one. MSP-Podcast
+        # carries Split_Set ("Train" or "Development") on every row, and the
+        # merge above concatenates both into one pool, so without keeping this
+        # column the official protocol cannot be recovered downstream. Carried
+        # as a plain string, empty for corpora with no such field.
+        all_official = first_col(["Split_Set", "split_set"], default=None)
 
         all_transcripts = [None] * n
         if self.modality in ["text", "both"]:
@@ -278,6 +386,21 @@ class EmotionDataset(Dataset):
         # this project's label space in the same order.
         zero_label_dist = np.zeros(9, dtype=np.float32)
         matched_meta = 0
+
+        # Direction-aware soft labels. Loaded whenever a run asks for either
+        # lever, since both read the same alpha. Absent file means the run
+        # degrades to hard-label training rather than failing, which keeps a
+        # fresh clone usable before the map has been built.
+        realness = None
+        matched_realness = 0
+        if (getattr(config, "soft_label_mode", "hard") != "hard"
+                or bool(getattr(config, "realness_loss_weight", False))):
+            realness = load_realness(
+                getattr(config, "realness_map_path", None),
+                bool(getattr(config, "realness_placebo", False)))
+            if realness is None:
+                print("   WARNING: realness map not found; falling back to "
+                      "hard labels at full weight")
 
         # Preextracted feature column is touched per-row (large nested structs);
         # only grab the whole column when actually needed.
@@ -335,6 +458,8 @@ class EmotionDataset(Dataset):
             label = all_labels[i]
             if label is None and all_emoclass[i] is not None:
                 label = self.EMOCLASS_TO_LABEL.get(all_emoclass[i], -1)
+            if label is None and all_emoname[i] is not None:
+                label = self.EMONAME_TO_LABEL.get(all_emoname[i], -1)
             if label is None or label < 0 or label > 3:
                 skipped_label_count += 1
                 continue
@@ -388,15 +513,28 @@ class EmotionDataset(Dataset):
                 "difficulty": difficulty,
                 "transcript": all_transcripts[i] or "[EMPTY]",
                 "dataset": dataset_name,
+                "official_split": str(all_official[i] or ""),
                 "speaker": (f"{dataset_name}:{all_speakers[i]}"
                             if all_speakers[i] is not None
                             else f"{dataset_name}:row{i}"),
             }
 
+            # Audio filename stripped of directory and extension. Both the
+            # annotator statistics and the realness map are keyed by it, so
+            # it is computed once here and kept on the sample.
+            fname = all_filenames[i]
+            key = (os.path.basename(str(fname)).rsplit(".", 1)[0]
+                   if fname is not None else None)
+            sample["utt_key"] = key or ""
+
+            if realness is not None:
+                alpha, annot4, realness_mask = realness.get(key)
+                sample["realness_alpha"] = alpha
+                sample["realness_probs"] = annot4
+                sample["realness_mask"] = realness_mask
+                matched_realness += int(realness_mask > 0)
+
             if subtype_meta is not None:
-                fname = all_filenames[i]
-                key = (os.path.basename(str(fname)).rsplit(".", 1)[0]
-                       if fname is not None else None)
                 row = subtype_meta.row(key) if key is not None else None
                 if row is not None:
                     sample["subtype_dist"] = subtype_meta.subtype_dist[row]
@@ -439,6 +577,25 @@ class EmotionDataset(Dataset):
             print(f"   Skipped {skipped_vad_count} samples with missing/NaN VAD values (regression mode)")
         if skipped_label_count > 0:
             print(f"   Skipped {skipped_label_count} samples with invalid label (None or > 3)")
+
+        # Optional ASR condition. Reference transcripts are human for every
+        # corpus, an oracle the text branch would not have at deployment, so
+        # the paper owes a number on recognised speech. Opt-in and keyed by
+        # corpus, so training keeps its own text while the evaluation corpora
+        # are swapped; absent the key nothing changes.
+        #
+        # This runs AFTER label and VAD filtering, deliberately. The raw HF
+        # table is longer than the evaluated set (IEMOFULL loads 10,039 rows
+        # and keeps 5,531), and the ASR files are generated from the filtered
+        # dataset, which is also the order every prediction dump uses. Doing
+        # the swap before filtering compares a 5,531-row file against 10,039
+        # rows and cannot line up.
+        asr_dir = getattr(config, "asr_transcript_dir", None)
+        if asr_dir and self.modality in ["text", "both"]:
+            refs = [row["transcript"] for row in self.data]
+            swapped = load_asr_transcripts(asr_dir, dataset_name, refs)
+            for row, text in zip(self.data, swapped):
+                row["transcript"] = text
 
     def cache_encoder_features(self, encoder, device, batch_size=16):
         """
@@ -655,6 +812,14 @@ class EmotionDataset(Dataset):
             result["annot_consensus"] = item["annot_consensus"]
             result["label_dist"] = item["label_dist"]
             result["annot_mask"] = item["annot_mask"]
+
+        # Direction-aware soft labels, present only when a lever is enabled.
+        # Copied through for the same reason as the block above: the collate
+        # function batches whatever keys the first item carries.
+        if "realness_mask" in item:
+            result["realness_alpha"] = item["realness_alpha"]
+            result["realness_probs"] = item["realness_probs"]
+            result["realness_mask"] = item["realness_mask"]
 
         # Frame-level: read one row from the memmap. Only this row is
         # paged in, so RAM stays flat regardless of corpus size.

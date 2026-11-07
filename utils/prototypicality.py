@@ -22,7 +22,7 @@ def calculate_difficulty(valence, arousal, dominance, label, expected_vad):
         arousal: float (0-1 normalized)
         dominance: float (0-1 normalized)
         label: int (0-3)
-        expected_vad: dict mapping label → [V, A, D] prototype
+        expected_vad: dict mapping label to [V, A, D] prototype
 
     Returns:
         float: Euclidean distance (0-3 range typically)
@@ -371,6 +371,82 @@ def residual_targets(vad, labels, means, whiten=None):
     return out
 
 
+def symmetric_whitening_matrices(inv_covs):
+    """Symmetric inverse square roots of the covariances.
+
+    whitening_matrices returns Cholesky factors, which are triangular. That
+    makes the whitened components depend on the order the VAD axes are listed
+    in: with a lower-triangular factor the last component is a scaled
+    dominance alone while the first mixes all three. The symmetric root
+    treats the axes evenly.
+
+    Both satisfy W W^T = inv_cov, so the norm of the whitened residual is the
+    Mahalanobis distance either way; only the individual components differ,
+    and those are what the auxiliary head regresses.
+
+    Args:
+        inv_covs: [C, 3, 3] inverse covariances.
+
+    Returns:
+        [C, 3, 3] symmetric matrices W with W W = inv_cov.
+    """
+    out = np.zeros_like(inv_covs)
+    k = inv_covs.shape[-1]
+    for c in range(inv_covs.shape[0]):
+        try:
+            vals, vecs = np.linalg.eigh(inv_covs[c])
+            vals = np.maximum(vals, 1e-12)
+            out[c] = vecs @ np.diag(np.sqrt(vals)) @ vecs.T
+        except np.linalg.LinAlgError:
+            out[c] = np.eye(k)
+    return out
+
+
+def signed_axis_whitened(vad, labels, means, whiten, neutral_index: int = 0):
+    """signed_axis_targets, but computed in the whitened space.
+
+    The original works on raw VAD, which confounds the decomposition with the
+    absence of whitening; the unwhitened residual is null (+0.07 on IEMOCAP
+    neutral AUC against +1.33 whitened), so an unwhitened signed target would
+    most likely be null for that reason rather than because the decomposition
+    fails.
+
+    Here the residual and the class axis are both whitened before projecting,
+    so the only difference from the plain whitened residual is the change of
+    basis: one signed coordinate along the class's own direction away from
+    neutral, and the magnitude of what is left.
+
+    Args:
+        vad: [N, 3] array.
+        labels: [N] class ids.
+        means: [C, 3] class centres.
+        whiten: [C, 3, 3] per-class whitening matrices.
+        neutral_index: which class is neutral.
+
+    Returns:
+        [N, 2] targets, column 0 signed along the axis, column 1 off-axis
+        magnitude.
+    """
+    out = np.zeros((len(labels), 2), dtype=np.float64)
+    neutral = means[neutral_index]
+    for c in np.unique(labels):
+        m = labels == c
+        w = whiten[int(c)]
+        d = (vad[m] - means[c]) @ w
+        axis = (means[c] - neutral) @ w
+        norm = np.linalg.norm(axis)
+        if norm < 1e-8:
+            # Neutral itself has no direction away from neutral. Fall back to
+            # the plain magnitude so the column is still defined.
+            out[m, 1] = np.linalg.norm(d, axis=1)
+            continue
+        axis = axis / norm
+        along = d @ axis
+        out[m, 0] = along
+        out[m, 1] = np.linalg.norm(d - np.outer(along, axis), axis=1)
+    return out
+
+
 def all_class_residuals(vad, labels, means, whiten=None):
     """Residual to every class centre, not only the sample's own.
 
@@ -501,3 +577,176 @@ def pooled_whitening(train_data, means: np.ndarray, num_classes: int,
     except np.linalg.LinAlgError:
         w = np.eye(3)
     return np.tile(w, (num_classes, 1, 1))
+
+def marginal_whitening(train_data, dims=(0, 1, 2)):
+    """Global mean and whitening from the MARGINAL VAD covariance.
+
+    Deliberately ignores the class labels. Where class_vad_stats fits one
+    ellipsoid per class, this fits a single ellipsoid to the whole training
+    pool, so the resulting transform carries no class-relative information at
+    all.
+
+    This exists as a control. The map v -> W (v - mu) is affine and
+    invertible, so its output carries exactly the same information as raw
+    VAD; only the conditioning of the regression target changes. An arm using
+    it therefore separates "rescaling the target helps for optimisation
+    reasons" from "rescaling helps because it expresses position relative to
+    a class prototype". Any difference from the raw VAD arm cannot be
+    informational.
+
+    Args:
+        train_data: sequence of sample dicts with valence/arousal/dominance.
+        dims: which VAD axes to keep.
+
+    Returns:
+        (mean [k], whitening [k, k]) with whiten = cholesky(inv(cov)), applied
+        on the right as `(v - mean) @ whiten` to match residual_targets.
+    """
+    dims = tuple(dims)
+    k = len(dims)
+    pts = np.array([[r.get('valence', 0.0), r.get('arousal', 0.0),
+                     r.get('dominance', 0.0)] for r in train_data],
+                   dtype=np.float64)[:, list(dims)]
+    if len(pts) < 4:
+        return np.zeros(k), np.eye(k)
+    mean = pts.mean(axis=0)
+    cov = np.atleast_2d(np.cov(pts, rowvar=False)) + 1e-4 * np.eye(k)
+    try:
+        whiten = np.linalg.cholesky(np.linalg.inv(cov))
+    except np.linalg.LinAlgError:
+        whiten = np.eye(k)
+    return mean, whiten
+
+def diagonal_whitening(train_data, means: np.ndarray, num_classes: int,
+                       dims=(0, 1, 2), ridge: float = 1e-4) -> np.ndarray:
+    """Per-class diagonal scaling: divide each axis by its within-class std.
+
+    The scale-matched control. Full whitening does two things at once, it puts
+    every coordinate on unit variance AND it decorrelates the axes by rotating
+    the class ellipsoid onto its principal directions. The unwhitened residual
+    does neither, so comparing it against the whitened residual cannot say
+    which of the two carries the effect.
+
+    This does only the first. The target has approximately unit variance per
+    coordinate, like the whitened residual, but the class ellipsoid keeps its
+    tilt: off-diagonal correlation survives untouched. Whitened against
+    scale-matched therefore isolates the decorrelation step with scale held
+    fixed, which is the contrast that answers whether the gain is only target
+    rescaling.
+
+    Args:
+        train_data: sequence of sample dicts with valence/arousal/dominance
+            and label.
+        means: [C, k] class centres.
+        num_classes: number of classes.
+        dims: which VAD axes to keep.
+        ridge: added to the variance before the square root, matching the
+            ridge class_vad_stats applies to the full covariance.
+
+    Returns:
+        [C, k, k] diagonal matrices with 1 / sigma on the diagonal, applied on
+        the right as `(v - mean) @ W` to match residual_targets.
+    """
+    dims = tuple(dims)
+    k = len(dims)
+    out = np.zeros((num_classes, k, k), dtype=np.float64)
+    for c in range(num_classes):
+        rows = [r for r in train_data if r.get('label') == c]
+        if len(rows) < 4:
+            out[c] = np.eye(k)
+            continue
+        pts = np.array([[r.get('valence', 0.0), r.get('arousal', 0.0),
+                         r.get('dominance', 0.0)] for r in rows],
+                       dtype=np.float64)[:, list(dims)]
+        var = pts.var(axis=0, ddof=1) + ridge
+        out[c] = np.diag(1.0 / np.sqrt(var))
+    return out
+
+
+def vad_trust_weights(vad: np.ndarray, labels: np.ndarray,
+                      means: np.ndarray, inv_covs: np.ndarray) -> np.ndarray:
+    """Per-sample confidence that VAD alone accounts for the given label.
+
+    Returns the Gaussian class posterior evaluated at each sample's own label,
+    under uniform class priors. A row whose VAD sits squarely inside its own
+    class ellipsoid scores near 1; a row whose VAD looks like a different
+    class scores near 0.
+
+    The motivation is measured rather than assumed. Fitting these Gaussians on
+    MSP-Podcast and transferring them to IEMOCAP leaves 34.8 percent of that
+    corpus misclassified from VAD alone, and across sixteen arm and control
+    pairs twelve arms LOSE accuracy on exactly those rows while gaining on the
+    rest. The loud-sad and muted-happy utterances live there, so regressing
+    VAD on them teaches the encoder something the classifier has to undo.
+    Using this as an auxiliary loss weight confines the VAD target to the rows
+    where VAD and the label agree.
+
+    Uniform priors are deliberate. Fitted source priors would let a row profit
+    from source-to-target prior shift, which is not the quantity wanted here.
+
+    Args:
+        vad: [N, D] VAD coordinates.
+        labels: [N] class labels indexing means and inv_covs.
+        means: [C, D] per-class means.
+        inv_covs: [C, D, D] per-class inverse covariances.
+
+    Returns:
+        [N] posterior weights in (0, 1], NOT normalised. Callers that feed an
+        auxiliary loss should rescale to mean one so the loss magnitude and
+        proto_predictor_weight stay comparable across arms.
+    """
+    vad = np.asarray(vad, dtype=np.float64)
+    labels = np.asarray(labels).astype(int)
+    num_classes = len(means)
+    scores = np.empty((len(vad), num_classes), dtype=np.float64)
+    for c in range(num_classes):
+        delta = vad - means[c]
+        quad = np.einsum('ni,ij,nj->n', delta, inv_covs[c], delta)
+        sign, logdet = np.linalg.slogdet(inv_covs[c])
+        # logdet of the inverse covariance, so its sign contributes positively.
+        scores[:, c] = -0.5 * quad + 0.5 * logdet
+    scores -= scores.max(axis=1, keepdims=True)
+    post = np.exp(scores)
+    post /= post.sum(axis=1, keepdims=True)
+    return post[np.arange(len(vad)), labels]
+
+
+def vad_explainable(vad: np.ndarray, labels: np.ndarray, means: np.ndarray,
+                    inv_covs: np.ndarray) -> np.ndarray:
+    """Whether VAD alone accounts for each row's label.
+
+    A row is explainable when the Gaussian class model, fitted on the training
+    VAD and evaluated under uniform priors, assigns it to its own class. A row
+    is unexplainable when some RIVAL class is closer, which is the competitive
+    condition rather than mere distance from the row's own centre.
+
+    That distinction is measured, not assumed. On IEMOCAP the toward-rival
+    component of the residual predicts this at AUC 0.931 while the residual
+    NORM reaches only 0.654, and the orthogonal component is exactly chance at
+    0.500. Distance from the class centre is therefore a poor proxy: half of
+    the most displaced quintile is still explainable, because those rows
+    drifted in directions no rival occupies.
+
+    Uniform priors are deliberate. Fitted source priors would let a row profit
+    from source-to-target prior shift, which is not the quantity wanted here.
+
+    Args:
+        vad: [N, D] VAD coordinates.
+        labels: [N] class labels indexing means and inv_covs.
+        means: [C, D] per-class means.
+        inv_covs: [C, D, D] per-class inverse covariances.
+
+    Returns:
+        [N] float array, 1.0 where VAD accounts for the label and 0.0 where a
+        rival class is closer. Float rather than bool so it can be used
+        directly as a BCE target.
+    """
+    vad = np.asarray(vad, dtype=np.float64)
+    labels = np.asarray(labels).astype(int)
+    scores = np.empty((len(vad), len(means)), dtype=np.float64)
+    for c in range(len(means)):
+        delta = vad - means[c]
+        quad = np.einsum('ni,ij,nj->n', delta, inv_covs[c], delta)
+        _, logdet = np.linalg.slogdet(inv_covs[c])
+        scores[:, c] = -0.5 * quad + 0.5 * logdet
+    return (scores.argmax(axis=1) == labels).astype(np.float64)

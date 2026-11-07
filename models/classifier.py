@@ -49,6 +49,7 @@ class EmotionClassifier(nn.Module):
         num_attn_heads_pool=4,
         attn_pool_hidden=256,
         use_mean_pool_control=False,
+        use_gradient_checkpointing=True,
         emotion2vec_upstream_dir="/home/rml/Documents/pythontest/emotion2vec/upstream",
         use_cross_modal_projection=False,
         cross_modal_dim=256,
@@ -139,6 +140,7 @@ class EmotionClassifier(nn.Module):
                 model_name=audio_model_name,
                 unfreeze_layers=unfreeze_audio_layers,
                 pooling=audio_pooling,
+                use_gradient_checkpointing=use_gradient_checkpointing,
             )
             self.audio_dim = self.audio_encoder.get_output_dim()
         elif audio_encoder_type == "emotion2vec" and modality in ["audio", "both"]:
@@ -146,6 +148,7 @@ class EmotionClassifier(nn.Module):
                 model_name=audio_model_name,
                 unfreeze_layers=unfreeze_audio_layers,
                 pooling=audio_pooling,
+                use_gradient_checkpointing=use_gradient_checkpointing,
             )
             self.audio_dim = self.audio_encoder.get_output_dim()
         else:
@@ -156,6 +159,7 @@ class EmotionClassifier(nn.Module):
             self.text_encoder = FrozenBERTEncoder(
                 model_name=text_model_name,
                 unfreeze_layers=unfreeze_bert_layers,
+                use_gradient_checkpointing=use_gradient_checkpointing,
             )
             self.text_dim = self.text_encoder.get_output_dim()
         else:
@@ -170,8 +174,14 @@ class EmotionClassifier(nn.Module):
         self.frame_pool = None
         if audio_pooling == "frames" and modality in ("audio", "both"):
             pool_cls = MeanPoolControl if use_mean_pool_control else AttentionPool
+            # Frame width comes from the encoder, not a constant. It is 768
+            # for emotion2vec and WavLM base-plus but 1024 for WavLM large,
+            # and a hardcoded 768 made the scoring MLP reject large's frames
+            # outright. Reading it from self.audio_dim, which every encoder
+            # branch above sets to its per-frame width, leaves the 768
+            # encoders bit-for-bit unchanged.
             self.frame_pool = pool_cls(
-                input_dim=768,
+                input_dim=int(self.audio_dim),
                 num_heads=int(num_attn_heads_pool),
                 hidden_dim=int(attn_pool_hidden),
                 dropout=dropout,
@@ -750,6 +760,7 @@ def create_model(config):
         num_attn_heads_pool=cfg.get('num_attn_heads_pool', 4),
         attn_pool_hidden=cfg.get('attn_pool_hidden', 256),
         use_mean_pool_control=cfg.get('use_mean_pool_control', False),
+        use_gradient_checkpointing=cfg.get('use_gradient_checkpointing', True),
         emotion2vec_upstream_dir=cfg.get(
             'emotion2vec_upstream_dir',
             '/home/rml/Documents/pythontest/emotion2vec/upstream'

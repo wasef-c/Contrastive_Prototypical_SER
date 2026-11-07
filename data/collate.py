@@ -38,6 +38,7 @@ def vad_collate_fn(batch):
     has_speaker = 'speaker' in batch[0]
     has_label4 = 'label4' in batch[0]
     has_annot = 'annot_mask' in batch[0]
+    has_realness = 'realness_mask' in batch[0]
 
     if has_features:
         collated['features'] = []
@@ -60,6 +61,10 @@ def vad_collate_fn(batch):
         collated['annot_consensus'] = []
         collated['label_dist'] = []
         collated['annot_mask'] = []
+    if has_realness:
+        collated['realness_alpha'] = []
+        collated['realness_probs'] = []
+        collated['realness_mask'] = []
     has_sample_index = 'sample_index' in batch[0]
     if has_sample_index:
         collated['sample_index'] = []
@@ -104,6 +109,10 @@ def vad_collate_fn(batch):
             collated['annot_consensus'].append(item['annot_consensus'])
             collated['label_dist'].append(item['label_dist'])
             collated['annot_mask'].append(item['annot_mask'])
+        if has_realness:
+            collated['realness_alpha'].append(item['realness_alpha'])
+            collated['realness_probs'].append(item['realness_probs'])
+            collated['realness_mask'].append(item['realness_mask'])
         if has_sample_index:
             collated['sample_index'].append(item['sample_index'])
 
@@ -137,6 +146,16 @@ def vad_collate_fn(batch):
         )
         collated['annot_mask'] = torch.tensor(
             collated['annot_mask'], dtype=torch.float32,
+        )
+    if has_realness:
+        collated['realness_alpha'] = torch.tensor(
+            collated['realness_alpha'], dtype=torch.float32,
+        )
+        collated['realness_probs'] = torch.tensor(
+            np.stack(collated['realness_probs']), dtype=torch.float32,
+        )
+        collated['realness_mask'] = torch.tensor(
+            collated['realness_mask'], dtype=torch.float32,
         )
 
     collated['label'] = torch.stack(collated['label'])

@@ -26,7 +26,8 @@ class Wav2Vec2Encoder(nn.Module):
     BACKBONE_CLS = Wav2Vec2Model
     PROCESSOR_CLS = Wav2Vec2Processor
 
-    def __init__(self, model_name="facebook/wav2vec2-base-960h", unfreeze_layers=0):
+    def __init__(self, model_name="facebook/wav2vec2-base-960h", unfreeze_layers=0,
+                 use_gradient_checkpointing=True):
         super().__init__()
 
         self.model_name = model_name
@@ -60,12 +61,21 @@ class Wav2Vec2Encoder(nn.Module):
             # current version: this model trains either way, 32 of 32
             # trainable tensors receiving nonzero gradient with the default.
             # Pinning it keeps that true if the default changes again.
-            self.wav2vec2.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False})
+            # Checkpointing was previously forced on here regardless of
+            # config, unlike the emotion2vec path which honours the flag.
+            # On WavLM Large that recompute cost roughly a third of the
+            # 64 minutes an epoch took, so it is now opt-out. Turning it OFF
+            # cannot reintroduce the reentrant bug described above, because
+            # with no checkpointing the backward pass is the ordinary one;
+            # the use_reentrant pin only matters while checkpointing is on.
+            if use_gradient_checkpointing:
+                self.wav2vec2.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False})
             trainable = sum(p.numel() for p in self.wav2vec2.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.wav2vec2.parameters())
             print(f"  {model_name}: unfroze top {unfreeze_layers}/{total_layers} layers ({trainable:,}/{total:,} params trainable)")
-            print(f"  Gradient checkpointing enabled")
+            print(f"  Gradient checkpointing "
+                  f"{'enabled' if use_gradient_checkpointing else 'DISABLED'}")
         else:
             self.wav2vec2.eval()
             print(f"  {model_name} loaded and frozen (output_dim={self.output_dim})")
@@ -170,7 +180,8 @@ class WavLMEncoder(Wav2Vec2Encoder):
     PROCESSOR_CLS = Wav2Vec2FeatureExtractor
 
     def __init__(self, model_name: str, unfreeze_layers: int = 0,
-                 pooling: str = "mean") -> None:
+                 pooling: str = "mean",
+                 use_gradient_checkpointing: bool = True) -> None:
         """Build the encoder.
 
         Args:
@@ -178,8 +189,12 @@ class WavLMEncoder(Wav2Vec2Encoder):
             unfreeze_layers: Number of top encoder layers to unfreeze.
             pooling: "mean" collapses time inside this class; "frames"
                 returns the time axis for a downstream pooler.
+            use_gradient_checkpointing: trade compute for activation memory
+                in the unfrozen layers. Off is markedly faster when VRAM
+                allows it.
         """
-        super().__init__(model_name=model_name, unfreeze_layers=unfreeze_layers)
+        super().__init__(model_name=model_name, unfreeze_layers=unfreeze_layers,
+                         use_gradient_checkpointing=use_gradient_checkpointing)
         if pooling not in ("mean", "frames"):
             raise ValueError(
                 f"unknown pooling mode: {pooling}. WavLMEncoder supports "
@@ -251,6 +266,7 @@ class Emotion2VecEncoder(nn.Module):
         model_name: str = "iic/emotion2vec_base",
         unfreeze_layers: int = 0,
         pooling: str = "mean",
+        use_gradient_checkpointing: bool = True,
     ):
         """
         Args:
@@ -311,7 +327,8 @@ class Emotion2VecEncoder(nn.Module):
             # Gradient checkpointing on unfrozen blocks: recomputes activations during
             # backward instead of storing them, trading compute for VRAM. This allows
             # larger batch sizes with the same memory budget.
-            self._apply_gradient_checkpointing(unfreeze_layers)
+            if use_gradient_checkpointing:
+                self._apply_gradient_checkpointing(unfreeze_layers)
 
             trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in self.model.parameters())
@@ -319,7 +336,8 @@ class Emotion2VecEncoder(nn.Module):
                 f"  emotion2vec: unfroze top {unfreeze_layers}/{total_blocks} blocks "
                 f"({trainable:,}/{total:,} params trainable)"
             )
-            print(f"  Gradient checkpointing enabled on {unfreeze_layers} blocks")
+            print(f"  Gradient checkpointing "
+                  f"{'enabled on ' + str(unfreeze_layers) + ' blocks' if use_gradient_checkpointing else 'DISABLED'}")
         else:
             self.model.eval()
             print(f"  emotion2vec loaded and frozen (output_dim={self.output_dim})")

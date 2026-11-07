@@ -8,6 +8,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import hashlib
 import math
+import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,6 +41,10 @@ from utils.margin_loss import LDAMLoss
 from utils.metrics import threshold_free_metrics
 from utils.metrics import calculate_classification_metrics, calculate_vad_metrics
 from utils.prototypicality import (
+    diagonal_whitening,
+    marginal_whitening,
+    signed_axis_whitened,
+    symmetric_whitening_matrices,
     pooled_whitening,
     DATASETS_WITH_VAD,
     LearnableCentroids,
@@ -48,14 +53,23 @@ from utils.prototypicality import (
     mahalanobis_distance,
     all_class_residuals,
     residual_targets,
+    vad_trust_weights,
+    vad_explainable,
     signed_axis_targets,
     whitening_matrices,
     batch_difficulty_tensor,
     calculate_difficulty,
 )
+from utils.genlabel import EmbeddingClassDensity, genlabel_mixup_step
 from utils.multiview_prototypicality import compute_multiview_difficulty, compute_crossmodal_agreement
-from utils.muted_mixup import (consistent_muted_mixup,
+from utils.muted_mixup import (ClassCentroidEMA, consistent_muted_mixup,
+                               solve_dirichlet_match,
+                               global_mixup_step,
+                               gaussian_posterior, prototype_pull_step,
+                               per_modality_mixup_step,
+                               solve_calibrated_prior,
                                muted_mixup_loss, muted_mixup_step,
+                               general_soft_mixup_step, soft_target_loss,
                                sparse_fill_mixup_step,
                                vad_gated_symmetric_mixup,
                                symmetric_mixup_step)
@@ -210,14 +224,74 @@ def _prepare_model_inputs(batch, config, model, device):
     return {}
 
 
+class _PerSampleProject(torch.autograd.Function):
+    """Project this branch's gradient off a reference gradient, per sample.
+
+    Batch-level PCGrad (proto_pcgrad) takes gradients of the batch-MEAN losses,
+    so its conflict test runs on the aggregate. At batch 16 with roughly 65
+    percent of rows VAD-explained, the auxiliary gradient is dominated by those
+    rows before any projection happens, so it cannot protect the minority where
+    the conflict actually lives.
+
+    This applies the same projection per ROW of the shared representation. A
+    row whose auxiliary gradient opposes its classification gradient keeps only
+    the orthogonal part; a row where they agree passes through untouched.
+
+    The reference gradient is supplied through a one-element list filled in
+    after the forward pass but before backward, because the classification
+    gradient is not known when the auxiliary head runs.
+
+    Scaling-invariant in the reference: multiplying ref by s scales dot by s
+    and denom by s squared, so the subtracted term is unchanged. AMP loss
+    scaling on the reference therefore does not alter the projection.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, ref_holder: list) -> torch.Tensor:
+        """Identity forward that remembers where to find the reference.
+
+        Args:
+            x: shared representation, [B, D].
+            ref_holder: one-element list, filled with the [B, D] reference
+                gradient before backward runs.
+
+        Returns:
+            x unchanged.
+        """
+        ctx.ref_holder = ref_holder
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        """Remove the component of grad_out that opposes the reference.
+
+        Args:
+            grad_out: [B, D] gradient arriving from the auxiliary branch.
+
+        Returns:
+            Tuple of the projected gradient and None for ref_holder.
+        """
+        ref = ctx.ref_holder[0]
+        if ref is None:
+            return grad_out, None
+        g = grad_out.flatten(1)
+        r = ref.flatten(1).to(g.dtype)
+        dot = (g * r).sum(dim=1, keepdim=True)
+        denom = r.pow(2).sum(dim=1, keepdim=True).clamp_min(1e-12)
+        g = torch.where(dot < 0, g - (dot / denom) * r, g)
+        return g.view_as(grad_out), None
+
+
 def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 contrastive_criterion=None, domain_discriminator=None, domain_adv_loss=None,
                 proto_predictor=None, scaler=None, global_step=0, current_epoch=0,
+                proto_predictor_audio=None, proto_predictor_text=None,
                 modality_discriminator=None, centroid_tracker=None,
                 proto_atyp_ctx=None, aux_vad_centroids=None, logit_adjust=None,
                 confidence_tracker=None, intensity_ctx=None,
                 ambiguity_weights=None, evidence_pos_weight=None,
-                hierarchical_emotion_weights=None, salience_stats=None):
+                hierarchical_emotion_weights=None, salience_stats=None,
+                genlabel_density=None):
     """
     Train for one epoch
 
@@ -286,8 +360,37 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
 
     optimizer.zero_grad()
     num_batches = len(dataloader)
+    aux_mix_count = 0
+
+    # Class VAD statistics for the soft-label-without-mixup arm. Built here
+    # rather than per batch so the conversion does not repeat, and before
+    # the loop because the primary loss needs them, which runs earlier in
+    # the iteration than the mixup block that builds its own copy.
+    _vs_means = _vs_inv = None
+    if getattr(config, 'use_vad_soft_labels', False):
+        if getattr(config, '_proto_means', None) is None:
+            raise ValueError(
+                "use_vad_soft_labels needs the fitted class statistics; "
+                "enable use_proto_predictor so they are computed.")
+        for _incompatible in ('use_vrex', 'use_prototypical_weighting',
+                              'use_salience_weighting',
+                              'use_prototypical_label_smoothing'):
+            if getattr(config, _incompatible, False):
+                raise ValueError(
+                    f"use_vad_soft_labels cannot be combined with "
+                    f"{_incompatible}: both decide how the primary loss is "
+                    f"reduced, and the combination would silently change it.")
+        _vs_means = torch.as_tensor(config._proto_means, dtype=torch.float32,
+                                    device=device)
+        _vs_inv = torch.as_tensor(config._proto_inv_covs,
+                                  dtype=torch.float32, device=device)
 
     for batch_idx, batch in enumerate(dataloader):
+        # Holder for the per-sample PCGrad reference gradient. Defined
+        # at loop scope: it is written inside the auxiliary branch and
+        # read again at backward, so a conditional definition would be
+        # a NameError on any batch that skips that branch.
+        _ps_ref = [None]
         is_last_batch = (batch_idx == num_batches - 1)
         should_step = ((batch_idx + 1) % accum_steps == 0) or is_last_batch
         # Move to device
@@ -318,7 +421,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             if use_embeddings:
                 # When modality adversarial is active, keep gradients flowing into
                 # the audio/text encoders via modal_features (no detach)
-                if modality_discriminator is not None:
+                if (modality_discriminator is not None
+                        or proto_predictor_audio is not None
+                        or proto_predictor_text is not None
+                        or bool(getattr(config, 'muted_mixup_per_modality',
+                                        False))):
                     model_inputs['detach_modal_features'] = False
                 result = model(**model_inputs, return_embeddings=True)
                 logits, projected_embeddings, raw_embeddings, modal_features = result
@@ -379,6 +486,18 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 use_proto_atyp = proto_atyp_ctx is not None
                 use_proto_weight = getattr(config, 'use_prototypical_weighting', False)
                 use_label_smooth = getattr(config, 'use_prototypical_label_smoothing', False)
+                use_vad_soft = getattr(config, 'use_vad_soft_labels', False)
+                # Direction-aware soft labels. soft_label_mode picks the
+                # target ("hard", "raw" or "realness") and
+                # realness_loss_weight switches lever two independently, so
+                # either lever can be run alone or both together.
+                soft_mode = str(getattr(config, 'soft_label_mode', 'hard'))
+                realness_weight_on = bool(
+                    getattr(config, 'realness_loss_weight', False))
+                realness_floor = float(
+                    getattr(config, 'realness_weight_floor', 0.25))
+                use_realness = (soft_mode in ('raw', 'realness')
+                                or realness_weight_on)
                 use_salience_weight = getattr(config, 'use_salience_weighting', False)
                 use_vrex = getattr(config, 'use_vrex', False)
 
@@ -502,6 +621,127 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         sample_weights=amb_w,
                         pos_weight=evidence_pos_weight,
                     )
+                elif use_vad_soft:
+                    # VAD-derived soft labels WITHOUT any mixup. The target
+                    # is the class posterior at the sample's OWN annotated
+                    # VAD point, the same q the mixup arms use.
+                    #
+                    # This separates two things the mixup arms confound:
+                    # whether soft labels derived from the affect
+                    # annotations are what helps, and whether blending is
+                    # needed to deliver them. The endpoint-posterior target
+                    # lam * q(v_a) + (1 - lam) * q(v_b) is exactly this
+                    # relabeling followed by STANDARD mixup, because mixup's
+                    # label rule is linear and the two operations commute.
+                    # So if this arm alone reproduces the gain, the blending
+                    # is not part of the mechanism at all.
+                    vad_now = batch['vad'].to(device).float()
+                    soft_targets = gaussian_posterior(vad_now, _vs_means,
+                                                      _vs_inv)
+                    if bool(getattr(config, 'vad_soft_label_shuffle', False)):
+                        # Placebo. Permute the soft labels WITHIN each class,
+                        # so every sample still gets a soft label typical of
+                        # its own class, with the same marginal distribution
+                        # and the same entropy, but not the one its own VAD
+                        # implies. Removes the per-sample affect information
+                        # and nothing else. A shuffle across classes would
+                        # instead be mislabelling, which is a different and
+                        # uninformative experiment.
+                        perm = torch.arange(labels.size(0), device=device)
+                        for c in labels.unique():
+                            idx = (labels == c).nonzero(as_tuple=True)[0]
+                            if idx.numel() > 1:
+                                perm[idx] = idx[torch.randperm(
+                                    idx.numel(), device=device)]
+                        soft_targets = soft_targets[perm]
+                    # Rows carrying no VAD annotation keep their hard label.
+                    has_vad = vad_now.abs().sum(dim=1) > 0
+                    if not bool(has_vad.all()):
+                        one_hot = F.one_hot(
+                            labels, num_classes=config.num_classes).float()
+                        soft_targets = torch.where(has_vad.unsqueeze(1),
+                                                   soft_targets, one_hot)
+                    cls_weights = (criterion.weight
+                                   if hasattr(criterion, 'weight') else None)
+                    per_sample_loss = soft_cross_entropy(logits, soft_targets,
+                                                         cls_weights)
+                    # Reduce here. The per-sample weighting chain further
+                    # down (vrex / salience / proto weighting) has no final
+                    # else, so a target kind outside its cases would leave
+                    # loss_primary unset. Combining this arm with those
+                    # schemes is refused at setup rather than silently
+                    # taking a different reduction.
+                    loss_primary = per_sample_loss.mean()
+                elif use_realness:
+                    # Direction-aware soft labels. A panel that split three
+                    # to two tells you it disagreed, not whether the
+                    # utterance genuinely sits between two emotions or the
+                    # annotators were unreliable about that distinction.
+                    # alpha is the share of this panel's own disagreement
+                    # running along label-pair axes that carry real
+                    # structure where the utterance sits in VAD space,
+                    # fitted by analysis.build_realness_map on the official
+                    # Train split alone.
+                    #
+                    # Two levers, independently switchable, both reading the
+                    # same alpha. "realness" interpolates the target toward
+                    # the annotator distribution by alpha; "raw" trusts that
+                    # distribution everywhere and is the comparison the
+                    # claim rests on, since beating hard labels alone would
+                    # only show that soft labels help.
+                    r_alpha = batch['realness_alpha'].to(device).float()
+                    r_probs = batch['realness_probs'].to(device).float()
+                    r_mask = batch['realness_mask'].to(device).float()
+
+                    one_hot = F.one_hot(
+                        labels, num_classes=config.num_classes).float()
+                    totals = r_probs.sum(dim=1, keepdim=True)
+                    soft = torch.where(totals > 0, r_probs / totals.clamp_min(1e-8),
+                                       one_hot)
+                    if soft_mode == 'raw':
+                        blend = soft
+                    else:
+                        a = r_alpha.clamp(0.0, 1.0).unsqueeze(1)
+                        blend = (1.0 - a) * one_hot + a * soft
+                    # A row the map does not cover is unmeasured, not
+                    # measured as noisy, so it keeps the hard label rather
+                    # than a fabricated distribution.
+                    keep = (r_mask > 0).unsqueeze(1)
+                    soft_targets = torch.where(keep, blend, one_hot)
+
+                    cls_weights = (criterion.weight
+                                   if hasattr(criterion, 'weight') else None)
+                    per_sample_loss = soft_cross_entropy(logits, soft_targets,
+                                                         cls_weights)
+
+                    if realness_weight_on:
+                        # Lever two. A panel whose split runs along noise
+                        # axes is evidence about the annotators rather than
+                        # the utterance, so it earns less influence. The
+                        # floor keeps it contributing, because its majority
+                        # label is still the best guess available and its
+                        # audio still teaches something.
+                        #
+                        # Normalised so the effective learning rate matches
+                        # the unweighted arms. The normaliser is computed
+                        # over the COVERED rows only, and uncovered rows are
+                        # pinned at one. Scaling everything by the batch
+                        # mean instead would push uncovered rows above every
+                        # measured row, since the covered weights average
+                        # below one, and rows with missing metadata would
+                        # end up with the most influence in the batch.
+                        covered = r_mask > 0
+                        raw_w = realness_floor + (1.0 - realness_floor) * \
+                            r_alpha.clamp(0.0, 1.0)
+                        if bool(covered.any()):
+                            scale = (covered.sum().float()
+                                     / raw_w[covered].sum().clamp_min(1e-8))
+                            raw_w = raw_w * scale
+                        raw_w = torch.where(covered, raw_w,
+                                            torch.ones_like(raw_w))
+                        loss_primary = (per_sample_loss * raw_w).mean()
+                    else:
+                        loss_primary = per_sample_loss.mean()
                 elif use_label_smooth:
                     # Prototypicality-based label smoothing: atypical samples get softer labels
                     difficulties = batch_calculate_difficulty(batch, config.expected_vad).to(device)
@@ -658,7 +898,30 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                                 d_vad = batch_difficulty_tensor(batch, centroid_tracker(), device)
                             else:
                                 d_vad = batch_calculate_difficulty(batch, config.expected_vad).to(device)
-                            if ce_src == 'vad':
+                            if ce_src == 'mahal':
+                                # Atypicality as this project defines it: the
+                                # Mahalanobis distance from the sample's own
+                                # class centre, using covariances fitted on
+                                # the training split. Distinct from d_vad,
+                                # which is a Euclidean distance to hardcoded
+                                # centroids.
+                                #
+                                # This enters as a WEIGHT on the main loss,
+                                # not as a regression target, so it is not
+                                # something an auxiliary VAD head can imitate,
+                                # and being a norm it is not an affine
+                                # function of VAD.
+                                _v = batch['vad'].numpy().astype(np.float64)
+                                _pd = tuple(getattr(config, 'proto_vad_dims',
+                                                    (0, 1, 2)))
+                                if len(_pd) != _v.shape[1]:
+                                    _v = _v[:, list(_pd)]
+                                difficulties = torch.tensor(
+                                    mahalanobis_distance(
+                                        _v, batch['label'].numpy(),
+                                        config._ce_means, config._ce_inv_covs),
+                                    dtype=torch.float32, device=device)
+                            elif ce_src == 'vad':
                                 difficulties = d_vad
                             else:
                                 d_agree = compute_crossmodal_agreement(modal_features, device)
@@ -828,6 +1091,19 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         difficulties = torch.tensor(
                             signed_axis_targets(vad_np, lab_np, means),
                             dtype=torch.float32, device=device)
+                    elif target_kind == 'signedw':
+                        # Same decomposition, computed after whitening, so it
+                        # is compared against the whitened residual on equal
+                        # terms rather than against an unwhitened one.
+                        _w = getattr(config, '_proto_whiten', None)
+                        if _w is None:
+                            difficulties = torch.tensor(
+                                signed_axis_targets(vad_np, lab_np, means),
+                                dtype=torch.float32, device=device)
+                        else:
+                            difficulties = torch.tensor(
+                                signed_axis_whitened(vad_np, lab_np, means, _w),
+                                dtype=torch.float32, device=device)
                     elif target_kind == 'protoscore':
                         # Bounded prototypicality: 1 at the class centre,
                         # decaying towards 0 as the sample becomes atypical.
@@ -1023,6 +1299,114 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         difficulties = torch.tensor(
                             np.concatenate([_r, _sd], axis=1),
                             dtype=torch.float32, device=device)
+                    elif target_kind == 'resagree':
+                        # Prototypicality AND annotator agreement together.
+                        #
+                        # Q2 found the two predict model difficulty through
+                        # independent routes: in a joint logistic with class
+                        # fixed effects, disagreement carries +0.434 and
+                        # residual magnitude +0.336, each surviving the
+                        # other. They are also near orthogonal within class
+                        # (Spearman -0.003). If that complementarity carries
+                        # into the auxiliary task, the pair should beat
+                        # either alone.
+                        #
+                        # Agreement is standardised with training statistics
+                        # so both halves of the target have unit variance.
+                        # The existing resdisp kind does not do this: passing
+                        # raw positive dispersion values through the class
+                        # whitening leaves that half carrying 18.8x the
+                        # residual half's weight, which makes it a dispersion
+                        # arm rather than a combination. Dispersion is also
+                        # the wrong half by our own measurement, being inert
+                        # in the joint model.
+                        _r = residual_targets(vad_np, lab_np, means,
+                                              whiten=config._proto_whiten)
+                        _ag = batch['annot_consensus'].numpy().astype(
+                            np.float64)
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _ag[~_have] = _ag[_have].mean()
+                        elif not _have.any():
+                            _ag = np.full_like(_ag, config._agree_mu)
+                        _ag = (_ag - config._agree_mu) / config._agree_sd
+                        difficulties = torch.tensor(
+                            np.concatenate([_r, _ag[:, None]], axis=1),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'randfixed':
+                        # A FIXED random target per utterance: learnable, but
+                        # carrying no information about the emotion.
+                        #
+                        # The decisive test of the within-class-variance
+                        # story. The shuffled controls redraw their target
+                        # every batch, so the head can never fit them and the
+                        # trunk gets only noise; they gain +0.28 AUCneu. This
+                        # target is drawn once per utterance and held fixed
+                        # across all epochs, so the head CAN fit it, but only
+                        # by making the shared embedding keep utterances
+                        # individually distinguishable. That is precisely the
+                        # within-class spread cross-entropy collapses and
+                        # every arm that helps restores.
+                        #
+                        # If this reproduces the gain, the mechanism is that
+                        # the auxiliary task preserves within-class geometry
+                        # and the emotional content of the target is
+                        # irrelevant. If it does not, content matters and the
+                        # regulariser reading is wrong.
+                        #
+                        # Drawn from a standard normal, matching the whitened
+                        # residual's unit covariance, so the effective
+                        # auxiliary weight is comparable to uf4_res.
+                        _si = batch['sample_index'].numpy()
+                        difficulties = torch.tensor(
+                            config._rand_table[_si],
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'vadagree':
+                        # Globally whitened VAD plus standardised agreement.
+                        #
+                        # The fourth cell of the 2x2 completed by resagree:
+                        # with and without class-relative centring, crossed
+                        # with and without annotator agreement. Needed to say
+                        # whether centring contributes anything once agreement
+                        # is already in the target, which resagree against res
+                        # alone cannot answer.
+                        _wv = (vad_np - config._marginal_mean) @ \
+                            config._marginal_whiten
+                        _ag = batch['annot_consensus'].numpy().astype(
+                            np.float64)
+                        _have = batch['annot_mask'].numpy() > 0
+                        if _have.any() and not _have.all():
+                            _ag[~_have] = _ag[_have].mean()
+                        elif not _have.any():
+                            _ag = np.full_like(_ag, config._agree_mu)
+                        _ag = (_ag - config._agree_mu) / config._agree_sd
+                        difficulties = torch.tensor(
+                            np.concatenate([_wv, _ag[:, None]], axis=1),
+                            dtype=torch.float32, device=device)
+                    elif target_kind == 'whitevad':
+                        # CONTROL: whitening WITHOUT class-relative centering.
+                        #
+                        # The global mean and the marginal covariance ignore
+                        # the label entirely, so this target is an invertible
+                        # affine map of raw VAD and carries exactly the same
+                        # information the 'rawvad' arm does. Only the
+                        # conditioning of the regression target changes: the
+                        # axes are decorrelated and put on a common scale.
+                        #
+                        # It separates the two explanations the ablation
+                        # ladder otherwise confounds. The whitened residual
+                        # differs from raw VAD in BOTH class-relative
+                        # centering and conditioning, so a reviewer can argue
+                        # the gain is only that MSE on raw VAD weights three
+                        # correlated axes of unequal scale unevenly. If this
+                        # arm matches 'rawvad', conditioning explains nothing
+                        # and the rescaling works only in combination with
+                        # centering. If it matches the residual arm, the
+                        # class-relative reading is wrong.
+                        difficulties = torch.tensor(
+                            (vad_np - config._marginal_mean)
+                            @ config._marginal_whiten,
+                            dtype=torch.float32, device=device)
                     elif target_kind == 'rawvad':
                         # Raw VAD, with no centroid subtraction and no
                         # whitening. The direct test of whether
@@ -1121,7 +1505,15 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         raise ValueError(
                             f"unknown proto_shuffle_mode: {_mode}. Use batch, "
                             f"pool or gauss.")
-                pred_proto = proto_predictor(raw_embeddings)
+                # Per-sample gradient surgery: wrap the auxiliary head's
+                # input so its gradient into the shared trunk can be projected
+                # row by row against the classification gradient. The reference
+                # is filled in at backward time.
+                if bool(getattr(config, 'proto_pcgrad_per_sample', False)):
+                    _aux_in = _PerSampleProject.apply(raw_embeddings, _ps_ref)
+                else:
+                    _aux_in = raw_embeddings
+                pred_proto = proto_predictor(_aux_in)
                 # Optional per-sample weighting by annotator agreement. A
                 # contested utterance's consensus VAD summarises a
                 # disagreement rather than measuring the emotion, so its
@@ -1144,6 +1536,191 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         agree_w = torch.where(has_meta, agree_w,
                                               agree_w[has_meta].mean())
                     agree_w = agree_w / agree_w.mean().clamp_min(1e-6)
+
+                # Optional: class-balance the auxiliary loss.
+                #
+                # Neutral is 45 percent of the training pool, so it dominates
+                # the auxiliary gradient by count alone, whatever its target
+                # is worth. Masking it entirely (proto_skip_neutral) tests the
+                # extreme and overshoots: it removes half the neutral-AUC gain
+                # on IEMOCAP, so the neutral residual does carry information.
+                # This is the middle ground. Rows are weighted by the same
+                # class weights the classifier already uses, so neutral's
+                # share of the auxiliary gradient falls from 45 to about 31
+                # percent without being eliminated, and no new hyperparameter
+                # is introduced.
+                #
+                # Weights are renormalised to mean one over the batch, so the
+                # auxiliary loss keeps its magnitude and
+                # proto_predictor_weight stays comparable across arms.
+                if (bool(getattr(config, 'proto_class_balanced', False))
+                        and getattr(criterion, 'weight', None) is not None):
+                    _cw = criterion.weight.to(pred_proto.device)[
+                        batch['label'].to(pred_proto.device)]
+                    _cw = _cw.to(pred_proto.dtype)
+                    _cw = _cw / _cw.mean().clamp_min(1e-6)
+                    agree_w = _cw if agree_w is None else agree_w * _cw
+
+                # Optional: weight the auxiliary loss by how well VAD alone
+                # accounts for the row's label.
+                #
+                # Fitting a Gaussian class-conditional VAD classifier on
+                # MSP-Podcast and transferring it to IEMOCAP leaves 34.8
+                # percent of that corpus misclassified from VAD alone. Scored
+                # against matched controls on that split, twelve of fifteen
+                # arms LOSE accuracy on those rows while gaining on the rest;
+                # whitevad is +0.85 on the explained half and -1.06 on the
+                # unexplained half, both at p<0.05 over five seeds. The head
+                # capacity alone HELPS the unexplained half (ctrl_pool is
+                # +0.98 over base), so it is the VAD content specifically that
+                # costs, not the extra parameters.
+                #
+                # The loud-sad and muted-happy utterances are that population.
+                # Regressing VAD there pushes the encoder toward a VAD-shaped
+                # solution the classifier then has to undo. This weight
+                # confines the auxiliary target to rows where VAD and the
+                # label agree, and is computed from statistics already fitted
+                # on the training split.
+                #
+                # Modes:
+                #   global     rescale to mean one over the batch.
+                #   per_class  rescale to mean one WITHIN each class. The raw
+                #              posterior averages 0.41 on neutral and 0.78 on
+                #              angry, so the global mode silently reweights
+                #              classes and is confounded with clsbal, which is
+                #              already known not to help. per_class removes
+                #              that component and isolates within-class trust.
+                _trust_mode = str(getattr(config, 'proto_vad_trust', 'off'))
+                if (_trust_mode not in ('off', 'false', 'False')
+                        and getattr(config, '_proto_means', None) is not None
+                        and 'vad' in batch):
+                    _tv = batch['vad'].numpy().astype(np.float64)
+                    _tdims = getattr(config, '_proto_dims', (0, 1, 2))
+                    if len(_tdims) != _tv.shape[1]:
+                        _tv = _tv[:, list(_tdims)]
+                    _tl = batch['label'].numpy()
+                    _tw = vad_trust_weights(_tv, _tl, config._proto_means,
+                                            config._proto_inv_covs)
+                    _tw = torch.tensor(_tw, dtype=pred_proto.dtype,
+                                       device=pred_proto.device)
+                    if _trust_mode == 'per_class':
+                        _tl_t = batch['label'].to(pred_proto.device)
+                        for _c in _tl_t.unique():
+                            _m = _tl_t == _c
+                            _tw[_m] = _tw[_m] / _tw[_m].mean().clamp_min(1e-6)
+                    # The control permutes the weights across the batch. The
+                    # weight DISTRIBUTION is preserved exactly and only its
+                    # pairing with the sample is destroyed, so any gain that
+                    # survives it is not the mechanism.
+                    if bool(getattr(config, 'proto_vad_trust_shuffle', False)):
+                        _tw = _tw[torch.randperm(_tw.numel(),
+                                                 device=_tw.device)]
+                    _tw = _tw / _tw.mean().clamp_min(1e-6)
+                    agree_w = _tw if agree_w is None else agree_w * _tw
+
+                # Optional: drop neutral rows from the auxiliary loss.
+                #
+                # The target asks where a sample sits inside its own class,
+                # measured in that class's units. For the emotional classes
+                # that is well defined. For neutral it may not be: if
+                # neutrality is the absence of emotion rather than an emotion,
+                # a neutral utterance far from the neutral centroid is
+                # drifting toward SOME emotion, and the whitened residual
+                # expresses that drift in neutral's own coordinate system,
+                # which carries no information about which emotion it is
+                # drifting toward. Neutral is 45 percent of the training pool,
+                # so that possibly incoherent target dominates the auxiliary
+                # gradient.
+                #
+                # The surviving weights are rescaled to mean one, so the
+                # auxiliary loss keeps the same magnitude as the unmasked arms
+                # and proto_predictor_weight stays comparable across them.
+                if bool(getattr(config, 'proto_skip_neutral', False)):
+                    _keep = (batch['label'] != 0).to(
+                        device=pred_proto.device, dtype=pred_proto.dtype)
+                    if _keep.sum() > 0:
+                        _keep = _keep * (_keep.numel() / _keep.sum())
+                        agree_w = _keep if agree_w is None else agree_w * _keep
+
+                # Optional: score the head only on WITHIN-class variation.
+                #
+                # residual_targets centres each class on its own training mean,
+                # so the target's conditional mean given class is zero by
+                # construction. Measured on the held-out split the target's
+                # per-class means are 0.00 to 0.03, while the head predicts
+                # -0.29 to +0.26, and 8.5 percent of its output variance is
+                # explained by class alone (26 percent on IEMOCAP). That is
+                # the head reading class identity off the embedding and
+                # emitting it, which is error rather than signal.
+                #
+                # Removing the per-class mean from both sides makes that
+                # shortcut worthless: the head can only reduce its loss by
+                # predicting where a sample sits INSIDE its class.
+                #
+                # CAVEAT the mean is estimated per batch, and at batch 16 each
+                # class holds about four rows, so the estimate is noisy and
+                # removes some genuine within-class variance too. A running
+                # estimate would be better if this is pursued.
+                if bool(getattr(config, 'proto_centre_pred', False)):
+                    _lab_t = batch['label'].to(pred_proto.device)
+                    _pc = torch.zeros_like(pred_proto)
+                    _dc = torch.zeros_like(difficulties)
+                    for _c in _lab_t.unique():
+                        _m = _lab_t == _c
+                        if int(_m.sum()) > 1:
+                            _pc[_m] = pred_proto[_m].mean(dim=0, keepdim=True)
+                            _dc[_m] = difficulties[_m].mean(dim=0, keepdim=True)
+                    pred_proto = pred_proto - _pc
+                    difficulties = difficulties - _dc
+
+                # Second auxiliary task: is this row's label accounted
+                # for by its VAD at all?
+                #
+                # The regression target asks WHERE a sample sits inside its
+                # class. This asks whether a RIVAL class sits closer, which is
+                # the condition that actually separates the two populations:
+                # the toward-rival component of the residual predicts it at AUC
+                # 0.931, the residual NORM reaches only 0.654, and the
+                # orthogonal component is exactly chance at 0.500. mahal and
+                # protoscore are both functions of the norm, so they target the
+                # weaker quantity.
+                #
+                # Non-affine in VAD and dependent on ALL class centres, so a
+                # globally standardised VAD target cannot reproduce it. That is
+                # the critique that sank the class-relative residual, where
+                # whitevad matched res at p=0.918, and this is immune to it.
+                #
+                # Binary under BCE, so there is no target variance to match and
+                # the proto_predictor_weight calibration confound does not
+                # arise here. expl_head_weight is relative to the regression
+                # term, so the effective weight is proto_predictor_weight times
+                # expl_head_weight.
+                #
+                # Split BEFORE the target-kind branch below, so every kind sees
+                # a correctly shaped pred_proto.
+                _expl_loss = None
+                if bool(getattr(config, 'use_expl_head', False)):
+                    _expl_logit = pred_proto[:, -1]
+                    pred_proto = pred_proto[:, :-1]
+                    _ev = batch['vad'].numpy().astype(np.float64)
+                    _edims = getattr(config, '_proto_dims', (0, 1, 2))
+                    if len(_edims) != _ev.shape[1]:
+                        _ev = _ev[:, list(_edims)]
+                    _et = vad_explainable(_ev, batch['label'].numpy(),
+                                          config._proto_means,
+                                          config._proto_inv_covs)
+                    _et = torch.tensor(_et, dtype=_expl_logit.dtype,
+                                       device=_expl_logit.device)
+                    # Control: permute the targets across the batch. The class
+                    # balance is preserved exactly and only the pairing with
+                    # the sample is destroyed, so a gain that survives it is
+                    # not the mechanism.
+                    if bool(getattr(config, 'expl_head_shuffle', False)):
+                        _et = _et[torch.randperm(_et.numel(),
+                                                 device=_et.device)]
+                    _expl_loss = F.binary_cross_entropy_with_logits(
+                        _expl_logit, _et)
+
                 if str(getattr(config, 'proto_target', 'scalar')) == 'subtype':
                     if agree_w is None:
                         loss_proto_pred = F.cross_entropy(pred_proto, difficulties)
@@ -1157,6 +1734,84 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     per = F.mse_loss(pred_proto, difficulties,
                                      reduction='none').mean(dim=1)
                     loss_proto_pred = (per * agree_w).mean()
+                if _expl_loss is not None:
+                    loss_proto_pred = loss_proto_pred + (
+                        float(getattr(config, 'expl_head_weight', 1.0))
+                        * _expl_loss)
+
+                # VAD-consistent mixup on the AUXILIARY target.
+                #
+                # For a continuous target, mixup is exactly correct rather
+                # than assumed: the blend of two utterances genuinely has
+                # the blended affect coordinates, and the whitevad target is
+                # an affine map of VAD, so the blended target equals the
+                # blend of the endpoint targets identically. None of the
+                # difficulties that afflict the categorical target apply.
+                #
+                # This is only informative when the head is NONLINEAR. With
+                # proto_predictor_hidden_dim 0 the head is a bare linear map
+                # W, so W(lam*z_a + (1-lam)*z_b) - (lam*t_a + (1-lam)*t_b)
+                # collapses to lam*r_a + (1-lam)*r_b, a strictly weaker copy
+                # of the endpoint loss whose gradient on each sample is
+                # contaminated by a random partner's residual. With a hidden
+                # layer the identity breaks and the term becomes a real
+                # constraint: affect varies linearly along segments between
+                # training points in embedding space.
+                if (bool(getattr(config, 'aux_vad_mixup', False))
+                        and torch.is_floating_point(difficulties)):
+                    # Only meaningful for a CONTINUOUS target. A classification
+                    # target kind (allclass, subtype) carries integer class
+                    # indices, which cannot be blended, so the guard refuses
+                    # rather than silently averaging label ids.
+                    _n_av = raw_embeddings.size(0)
+                    if _n_av >= 2:
+                        _pick_av = torch.randint(_n_av, (_n_av,), device=device)
+                        _clash = _pick_av == torch.arange(_n_av, device=device)
+                        if _clash.any():
+                            _pick_av[_clash] = (_pick_av[_clash] + 1) % _n_av
+                        _alpha_av = float(getattr(config, 'aux_vad_mixup_alpha', 2.0))
+                        _lam_av = torch.distributions.Beta(
+                            _alpha_av, _alpha_av).sample((_n_av,)).to(device)
+                        if bool(getattr(config, 'aux_vad_mixup_fold', True)):
+                            _lam_av = torch.maximum(_lam_av, 1.0 - _lam_av)
+                        _lam_av = _lam_av.unsqueeze(1)
+                        _z_av = (_lam_av * raw_embeddings
+                                 + (1.0 - _lam_av) * raw_embeddings[_pick_av])
+                        _t_av = (_lam_av * difficulties
+                                 + (1.0 - _lam_av) * difficulties[_pick_av])
+                        if bool(getattr(config, 'aux_vad_mixup_shuffle', False)):
+                            # Placebo: keep the blended embeddings and the
+                            # exact distribution of blended targets, but
+                            # permute which target goes with which blend.
+                            # Same loss scale, correspondence destroyed.
+                            _t_av = _t_av[torch.randperm(_n_av, device=device)]
+                        _loss_av = F.mse_loss(proto_predictor(_z_av), _t_av)
+                        loss_proto_pred = loss_proto_pred + (
+                            float(getattr(config, 'aux_vad_mixup_weight', 1.0))
+                            * _loss_av)
+                        aux_mix_count += int(_z_av.size(0))
+
+                # Per-modality auxiliary losses, averaged with the fused one
+                # so the total keeps the same magnitude and
+                # proto_predictor_weight stays comparable across arms.
+                _extra_losses = []
+                for _head, _key in ((proto_predictor_audio, 'audio'),
+                                    (proto_predictor_text, 'text')):
+                    if _head is None or not isinstance(modal_features, dict):
+                        continue
+                    _feat = modal_features.get(_key)
+                    if _feat is None:
+                        continue
+                    _pred = _head(_feat)
+                    if agree_w is None:
+                        _extra_losses.append(F.mse_loss(_pred, difficulties))
+                    else:
+                        _per = F.mse_loss(_pred, difficulties,
+                                          reduction='none').mean(dim=1)
+                        _extra_losses.append((_per * agree_w).mean())
+                if _extra_losses:
+                    loss_proto_pred = ((loss_proto_pred + sum(_extra_losses))
+                                       / (1 + len(_extra_losses)))
 
                 # Gradient-alignment diagnostic, sampled every N steps.
                 # Reuses the loss already computed above rather than running a
@@ -1221,10 +1876,163 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
             # whole training set) rather than reweighting what is there,
             # which was measured to do nothing.
             loss_muted = torch.tensor(0.0, device=device)
+            loss_pull = torch.tensor(0.0, device=device)
+            if ((bool(getattr(config, 'use_proto_pull', False))
+                 or float(getattr(config, 'muted_mixup_pull_fraction', 0.0)) > 0)
+                    and getattr(config, '_pull_tracker', None) is None):
+                config._pull_tracker = ClassCentroidEMA(
+                    int(getattr(config, 'num_classes', 4)),
+                    int(getattr(config, 'hidden_dim', 1024)), device,
+                    momentum=float(getattr(config, 'proto_pull_momentum', 0.9)))
+                print("   Prototype pull: EMA class centroids in embedding "
+                      "space, momentum %.2f, weight %.2f%s"
+                      % (float(getattr(config, 'proto_pull_momentum', 0.9)),
+                         float(getattr(config, 'proto_pull_weight', 0.5)),
+                         "  [GLOBAL-MEAN PLACEBO]"
+                         if bool(getattr(config, 'proto_pull_global', False))
+                         else ""))
+            # Fitted class statistics as tensors for the derived-label
+            # path. Built here rather than per call so the conversion does not
+            # repeat inside the batch loop.
+            _mm_means = _mm_inv = _mm_logpri = None
+            if (bool(getattr(config, 'muted_mixup_derive_labels', False))
+                    or bool(getattr(config, 'muted_mixup_general_soft', False))
+                    or bool(getattr(config, 'muted_mixup_per_modality', False))):
+                if getattr(config, '_proto_means', None) is not None:
+                    _mm_means = torch.as_tensor(
+                        config._proto_means, dtype=torch.float32, device=device)
+                    _mm_inv = torch.as_tensor(
+                        config._proto_inv_covs, dtype=torch.float32,
+                        device=device)
+                    if (bool(getattr(config, 'muted_mixup_calibrated_prior',
+                                     False))
+                            and getattr(config, '_proto_cal_prior',
+                                        None) is not None):
+                        _mm_logpri = torch.as_tensor(
+                            config._proto_cal_prior, dtype=torch.float32,
+                            device=device)
+                    elif (bool(getattr(config, 'muted_mixup_class_priors', False))
+                            and getattr(config, '_proto_log_priors',
+                                        None) is not None):
+                        _mm_logpri = torch.as_tensor(
+                            config._proto_log_priors, dtype=torch.float32,
+                            device=device)
+
             if (getattr(config, 'use_muted_mixup', False)
                     and raw_embeddings is not None
                     and config.task_type == "classification"):
-                if getattr(config, 'muted_mixup_symmetric', False):
+                if bool(getattr(config, 'use_global_mixup', False)):
+                    # Global Mixup (Xie et al., AAAI 2023): relabel the blend
+                    # by a similarity-weighted vote over the real samples in
+                    # the batch. Same family as ours, unsupervised signal.
+                    mm_logits, mm_targets, mm_lam = global_mixup_step(
+                        raw_embeddings, labels,
+                        model.classify_from_embeddings,
+                        num_classes=int(getattr(config, 'num_classes', 4)),
+                        alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                        gamma=float(getattr(config, 'global_mixup_gamma', 4.0)),
+                        theta=getattr(config, 'global_mixup_theta', None),
+                        top_s=int(getattr(config, 'global_mixup_top_s', 0)),
+                        fold_lambda=bool(getattr(
+                            config, 'muted_mixup_fold_lambda', True)))
+                elif (bool(getattr(config, 'muted_mixup_per_modality', False))
+                        and isinstance(modal_features, dict)
+                        and _mm_means is not None):
+                    # Pre-fusion blend, one coefficient per modality. The
+                    # target uses an effective coefficient rather than an
+                    # exact correspondence; see per_modality_mixup_step.
+                    mm_logits, mm_targets, mm_lam = per_modality_mixup_step(
+                        modal_features['audio'], modal_features['text'],
+                        labels, batch['vad'].to(device).float(),
+                        model.classify_from_modalities,
+                        means=_mm_means, inv_covs=_mm_inv,
+                        alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                        w_audio=float(getattr(config, 'muted_mixup_w_audio',
+                                              0.638)),
+                        independent=bool(getattr(
+                            config, 'muted_mixup_modality_independent', True)),
+                        mode=str(getattr(config, 'muted_mixup_modality_mode',
+                                         'independent')),
+                        fold_lambda=bool(getattr(
+                            config, 'muted_mixup_fold_lambda', True)))
+                elif genlabel_density is not None:
+                    # GenLabel baseline: the target comes from class
+                    # densities over EMBEDDINGS, not over VAD. Statistics
+                    # for the next refit are accumulated from the same
+                    # embeddings, costing one matmul and no extra pass.
+                    genlabel_density.accumulate(raw_embeddings, labels)
+                    mm_logits, mm_targets, mm_lam = genlabel_mixup_step(
+                        raw_embeddings, labels,
+                        model.classify_from_embeddings,
+                        density=genlabel_density,
+                        num_classes=int(getattr(config, 'num_classes', 4)),
+                        alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                        gamma=float(getattr(config, 'genlabel_gamma', 1.0)),
+                        fold_lambda=bool(
+                            getattr(config, 'muted_mixup_fold_lambda', True)),
+                    )
+                elif bool(getattr(config, 'muted_mixup_general_soft', False)):
+                    # Any pair, Beta lambda folded to [0.5, 1], and the
+                    # blend's own class posterior as the target. No switch
+                    # point and no threshold: see general_soft_mixup_step.
+                    if _mm_means is None:
+                        raise ValueError(
+                            "muted_mixup_general_soft needs the fitted class "
+                            "statistics; enable use_proto_predictor so they "
+                            "are computed.")
+                    _mm_trust = None
+                    if bool(getattr(config, 'muted_mixup_trust_target', False)):
+                        if 'annot_consensus' not in batch:
+                            raise ValueError(
+                                "muted_mixup_trust_target needs annotator "
+                                "metadata; enable use_annotator_meta.")
+                        _mm_trust = batch['annot_consensus'].to(device).float()
+                        if bool(getattr(config,
+                                        'muted_mixup_trust_shuffle', False)):
+                            # Placebo: permute consensus WITHIN each class so
+                            # the distribution of trust weights is identical
+                            # and only its correspondence to the sample is
+                            # destroyed.
+                            _perm = torch.arange(labels.size(0), device=device)
+                            for _c in labels.unique():
+                                _ix = (labels == _c).nonzero(as_tuple=True)[0]
+                                if _ix.numel() > 1:
+                                    _perm[_ix] = _ix[torch.randperm(
+                                        _ix.numel(), device=device)]
+                            _mm_trust = _mm_trust[_perm]
+                    mm_logits, mm_targets, mm_lam = general_soft_mixup_step(
+                        raw_embeddings, labels,
+                        model.classify_from_embeddings,
+                        vad=batch['vad'].to(device).float(),
+                        means=_mm_means, inv_covs=_mm_inv,
+                        alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                        hard_control=bool(
+                            getattr(config, 'muted_mixup_hard_control', False)),
+                        vanilla_target=bool(
+                            getattr(config, 'muted_mixup_vanilla_target', False)),
+                        endpoint_posterior=bool(
+                            getattr(config, 'muted_mixup_endpoint_posterior',
+                                    False)),
+                        same_class_hard=bool(
+                            getattr(config, 'muted_mixup_same_class_hard',
+                                    False)),
+                        log_priors=_mm_logpri,
+                        trust=_mm_trust,
+                        trust_min=float(getattr(config, '_consensus_min', 0.2)),
+                        repeats=int(getattr(config, 'muted_mixup_repeats', 1)),
+                        pull_fraction=float(getattr(
+                            config, 'muted_mixup_pull_fraction', 0.0)),
+                        pull_tracker=getattr(config, '_pull_tracker', None),
+                        target_shuffle=bool(getattr(
+                            config, 'muted_mixup_target_shuffle', False)),
+                        dirichlet_conc=(
+                            torch.as_tensor(config._dirichlet_conc)
+                            if getattr(config, '_dirichlet_conc', None) is not None
+                            else None),
+                        fold_lambda=bool(
+                            getattr(config, 'muted_mixup_fold_lambda', True)),
+                    )
+                elif getattr(config, 'muted_mixup_symmetric', False):
                     # Blend both ways so equal numbers of synthetic samples
                     # land on each side of the neutral boundary and the
                     # prior is left where it was.
@@ -1305,14 +2113,53 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                             vad_shuffle=bool(
                                 getattr(config, 'muted_mixup_vad_shuffle', False)),
                             vad_target_span=span if mm_vad is not None else None,
+                            # Label the blend from its own position in VAD
+                            # space instead of inheriting the parent's class.
+                            derive_labels=bool(
+                                getattr(config, 'muted_mixup_derive_labels',
+                                        False)),
+                            proto_means=_mm_means,
+                            proto_inv_covs=_mm_inv,
+                            derive_min_posterior=float(
+                                getattr(config,
+                                        'muted_mixup_derive_min_posterior',
+                                        0.0)),
                         )
                     if mm_lam is not None:
                         muted_lam_sum += float(mm_lam.sum())
                         muted_lam_n += int(mm_lam.numel())
                 if mm_logits is not None:
                     cls_w_mm = criterion.weight if hasattr(criterion, 'weight') else None
-                    loss_muted = muted_mixup_loss(mm_logits, mm_targets, cls_w_mm)
+                    loss_muted = (
+                        soft_target_loss(mm_logits, mm_targets, cls_w_mm)
+                        if mm_targets.dim() == 2
+                        else muted_mixup_loss(mm_logits, mm_targets, cls_w_mm))
                     muted_synth_count += int(mm_logits.size(0))
+
+            if ((bool(getattr(config, 'use_proto_pull', False))
+                 or float(getattr(config, 'muted_mixup_pull_fraction', 0.0)) > 0)
+                    and raw_embeddings is not None
+                    and config.task_type == "classification"):
+                # Blend each sample toward its own class prototype. Both
+                # endpoints share a class, so the target is a plain one-hot
+                # and none of the geometry labelling applies.
+                _tr = config._pull_tracker
+                _pull_logits, _pull_y = (None, None)
+                if bool(getattr(config, 'use_proto_pull', False)):
+                    _pull_logits, _pull_y = prototype_pull_step(
+                        raw_embeddings, labels,
+                        model.classify_from_embeddings, _tr,
+                        alpha=float(getattr(config, 'proto_pull_alpha', 2.0)),
+                        global_target=bool(getattr(config, 'proto_pull_global',
+                                                   False)))
+                if _pull_logits is not None:
+                    _cw = (criterion.weight
+                           if hasattr(criterion, 'weight') else None)
+                    loss_pull = F.cross_entropy(_pull_logits, _pull_y,
+                                                weight=_cw)
+                # Update AFTER the loss so the centroids used as targets are
+                # not the same step's own embeddings.
+                _tr.update(raw_embeddings, labels)
 
             # Consistency-coupled mixup. The classification target for a
             # blended sample stays the hard original label, while its
@@ -1558,6 +2405,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     + adv_weight * loss_adversarial
                     + modality_adv_weight * loss_modality_adversarial
                     + proto_pred_weight * loss_proto_pred
+                    + float(getattr(config, 'proto_pull_weight', 0.0))
+                    * loss_pull
                     + cross_modal_weight * loss_cross_modal
                     + vadmix_weight * loss_vadmix
                     + aux_vad_weight * loss_aux_vad
@@ -1588,6 +2437,18 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
 
         # Backward (scale loss for gradient accumulation)
         scaled_loss = loss / accum_steps
+        # Per-sample PCGrad: capture the CLASSIFICATION gradient at the shared
+        # representation, so the auxiliary branch can be projected against it
+        # during the single backward that follows. One extra partial backward
+        # through the classifier head only, not through the encoder.
+        if (bool(getattr(config, 'proto_pcgrad_per_sample', False))
+                and proto_predictor is not None
+                and raw_embeddings is not None
+                and torch.is_tensor(loss_primary)
+                and loss_primary.requires_grad):
+            _ps_ref[0] = torch.autograd.grad(
+                loss_primary, raw_embeddings,
+                retain_graph=True, allow_unused=True)[0]
         use_pcgrad = (bool(getattr(config, 'proto_pcgrad', False))
                       and proto_predictor is not None
                       and proto_pred_weight > 0.0
@@ -1893,7 +2754,7 @@ def _cm_class_names(config):
 
 
 def _dump_split_predictions(model, dataloader, config, device, split_name,
-                            use_amp=False):
+                            use_amp=False, proto_predictor=None):
     """Write per-sample logits for one split to the run's checkpoint dir.
 
     Stacking, error-correlation analysis and threshold sweeps all need the
@@ -1912,18 +2773,37 @@ def _dump_split_predictions(model, dataloader, config, device, split_name,
         device: torch device.
         split_name: name used in the output filename.
         use_amp: whether to use mixed precision.
+        proto_predictor: optional auxiliary head. When given, its predictions
+            and the batch VAD are dumped alongside the logits, so the head's
+            fit to its own target can be measured offline on every split
+            rather than only inferred from the training loss. The head is
+            discarded after training, so this is the only record of it.
 
     Returns:
         Path to the written .npz file, or None when the split is empty.
     """
     model.eval()
     all_logits, all_labels, all_label4, all_speakers = [], [], [], []
+    all_aux, all_vad = [], []
+    want_aux = proto_predictor is not None
+    if want_aux:
+        proto_predictor.eval()
     with torch.no_grad():
         for batch in dataloader:
             model_inputs = _prepare_model_inputs(batch, config, model, device)
             with autocast('cuda', enabled=use_amp):
-                result = model(**model_inputs)
+                if want_aux:
+                    result = model(**model_inputs, return_embeddings=True)
+                else:
+                    result = model(**model_inputs)
             logits = result[0] if isinstance(result, tuple) else result
+            if want_aux:
+                # (logits, projected, raw, modal); raw is what the head reads.
+                raw_emb = result[2]
+                all_aux.append(
+                    proto_predictor(raw_emb).detach().cpu().float().numpy())
+                if 'vad' in batch:
+                    all_vad.append(batch['vad'].numpy())
             all_logits.append(logits.detach().cpu().float().numpy())
             all_labels.append(batch['label'].numpy())
             if 'label4' in batch:
@@ -1955,6 +2835,20 @@ def _dump_split_predictions(model, dataloader, config, device, split_name,
     }
     if all_label4:
         payload['label4'] = np.concatenate(all_label4, axis=0).astype(np.int64)
+    if all_aux:
+        payload['aux_pred'] = np.concatenate(all_aux, axis=0).astype(np.float32)
+    if all_vad:
+        payload['vad'] = np.concatenate(all_vad, axis=0).astype(np.float32)
+    # The fitted class statistics, so the target can be reconstructed exactly
+    # offline for any split. They are per-run: the prototypes are fitted on
+    # this seed's training rows, so they cannot be recovered from elsewhere.
+    for _attr in ('_proto_means', '_proto_whiten', '_proto_inv_covs',
+                  '_marginal_mean', '_marginal_whiten'):
+        _val = getattr(config, _attr, None)
+        if _val is not None:
+            payload[_attr.lstrip('_')] = np.asarray(_val, dtype=np.float64)
+    payload['proto_target'] = np.array(
+        str(getattr(config, 'proto_target', 'none')))
 
     np.savez_compressed(dest, **payload)
     print(f"      predictions -> {dest} {payload['logits'].shape}")
@@ -1994,7 +2888,33 @@ def get_checkpoint_paths(config):
 _FINGERPRINT_EXCLUDE = {
     'test_datasets',      # eval-only; handled separately as a subset check
     'wandb_project', 'experiment_name', 'experiment_id',
+    # Gradient checkpointing trades compute for activation memory and does
+    # not change the computation. Verified directly on 2026-09-13: one batch
+    # through the 4/4 model with identical seeds gave the same loss to ten
+    # decimals and bitwise identical gradients across all 89,183,496
+    # trainable elements. Excluded so toggling it does not mark finished runs
+    # stale and trigger a retrain.
+    'use_gradient_checkpointing',
 }
+
+
+def _session_of(speaker):
+    """Recover the IEMOCAP recording session number from a speaker id.
+
+    IEMOCAP speaker ids are of the form 'Ses01F', optionally carrying a
+    corpus prefix such as 'IEMOFULL:Ses01F'. The session number is the only
+    recording-condition grouping the corpus exposes, and each session holds
+    exactly two speakers, so holding one out is both speaker-disjoint and
+    condition-disjoint.
+
+    Args:
+        speaker: Speaker id string, possibly prefixed with a corpus name.
+
+    Returns:
+        Session number as an int, or None if the id carries no session tag.
+    """
+    match = re.search(r'Ses(\d+)', str(speaker))
+    return int(match.group(1)) if match else None
 
 
 def _config_fingerprint(config):
@@ -2276,7 +3196,86 @@ def train(config, datasets=None):
     val_indices = []
 
     split_rng = np.random.RandomState(int(config.seed))
-    if bool(getattr(config, 'val_split_by_speaker', False)):
+    heldout_session = getattr(config, 'heldout_session', None)
+    if heldout_session is not None:
+        # Session-independent cross-validation fold (standard IEMOCAP
+        # protocol). Train on four of the five recording sessions and
+        # evaluate on the fifth, so neither speaker nor recording condition
+        # is shared across the split. Each session contributes exactly two
+        # speakers, which makes the fold speaker-disjoint by construction
+        # rather than approximately so, unlike the sampling-based option
+        # below.
+        #
+        # The held-out session serves as the validation split and is also the
+        # reported evaluation set under this protocol. That is only honest
+        # because model selection here averages the final epochs rather than
+        # picking the best validation epoch, so nothing is selected on the
+        # rows being scored. Do not combine this with best-epoch selection.
+        want = int(heldout_session)
+        sessions = [_session_of(train_dataset.data[idx].get('speaker', ''))
+                    for idx in range(total_samples)]
+        untagged = sum(1 for s in sessions if s is None)
+        if untagged:
+            example = train_dataset.data[0].get('speaker', '?')
+            raise ValueError(
+                f"heldout_session={want} was requested but {untagged} of "
+                f"{total_samples} training rows carry no 'Ses<NN>' session "
+                f"tag, so the fold would not be session-independent. Example "
+                f"speaker id: {example!r}.")
+        available = sorted(set(sessions))
+        if want not in available:
+            raise ValueError(
+                f"heldout_session={want} matched no rows; the training pool "
+                f"holds sessions {available}.")
+        for idx, sess in enumerate(sessions):
+            (val_indices if sess == want else train_indices).append(idx)
+        val_dist = {}
+        for idx in val_indices:
+            val_dist[strat_labels[idx]] = val_dist.get(strat_labels[idx], 0) + 1
+        print(f"  Session-independent fold: holding out session {want} of "
+              f"{available}")
+        print(f"   {len(train_indices)} train rows, {len(val_indices)} "
+              f"evaluation rows")
+        print(f"   Held-out class counts: {dict(sorted(val_dist.items()))}")
+    elif bool(getattr(config, 'val_split_official', False)):
+        # The corpus's own split assignment, read from the official_split
+        # field the loader keeps. MSP-Podcast's Train and Development splits
+        # are speaker-disjoint, so this is the standard protocol and gives a
+        # validation set with no speaker shared with training.
+        #
+        # It costs training data, and not evenly: angry is 26.6 percent of
+        # Development against 11.4 percent of Train, so holding Development
+        # out drops 46 percent of the corpus's angry four-class rows against
+        # roughly 27 percent of happy and sad. Chosen deliberately here for
+        # the direction-aware arms, whose realness map is fitted on Train
+        # alone; a map fitted across a merged pool would let validation rows
+        # influence training targets through their own labels.
+        #
+        # Runs made with this are not comparable to runs made without it,
+        # because it changes which rows are trained on.
+        for idx in range(total_samples):
+            which = str(train_dataset.data[idx].get('official_split', ''))
+            if which == 'Train':
+                train_indices.append(idx)
+            elif which:
+                val_indices.append(idx)
+        if not train_indices or not val_indices:
+            raise ValueError(
+                "val_split_official is set but the corpus carries no usable "
+                "official_split field. MSP-Podcast supplies Split_Set; other "
+                "corpora do not, so use val_split_by_speaker or the default "
+                "stratified split instead.")
+        val_dist = {}
+        for idx in val_indices:
+            val_dist[strat_labels[idx]] = val_dist.get(strat_labels[idx], 0) + 1
+        train_dist = {}
+        for idx in train_indices:
+            train_dist[strat_labels[idx]] = train_dist.get(strat_labels[idx], 0) + 1
+        print(f"  Official corpus split: {len(train_indices)} train rows, "
+              f"{len(val_indices)} validation rows")
+        print(f"   Train class counts: {dict(sorted(train_dist.items()))}")
+        print(f"   Val class counts: {dict(sorted(val_dist.items()))}")
+    elif bool(getattr(config, 'val_split_by_speaker', False)):
         # Speaker-disjoint validation. The class-stratified split below puts
         # utterances from the same speaker on both sides, so validation
         # measures performance on speakers the model has already fitted and
@@ -2977,6 +3976,20 @@ def train(config, datasets=None):
                       "correct for imbalance. Set class_weight_mode: none to "
                       "avoid double-correcting.")
 
+        # Mahalanobis atypicality as a CE weight needs the fitted class
+        # statistics, which are otherwise only built when the auxiliary head
+        # is on. Fit them here so a weighting-only arm carries no extra head
+        # and stays capacity matched to the plain baseline.
+        if str(getattr(config, 'ce_weight_source', 'vad')) == 'mahal':
+            _wm, _wi = class_vad_stats(
+                [train_dataset.data[i] for i in train_indices],
+                int(config.num_classes),
+                dims=tuple(getattr(config, 'proto_vad_dims', (0, 1, 2))))
+            config._ce_means = _wm
+            config._ce_inv_covs = _wi
+            print(f"   CE weighting by Mahalanobis atypicality: class stats "
+                  f"fitted on {len(train_indices)} training rows")
+
         # Use reduction='none' if we need per-sample weighting or label smoothing
         use_proto_weight = getattr(config, 'use_prototypical_weighting', False)
         use_label_smooth = getattr(config, 'use_prototypical_label_smoothing', False)
@@ -3149,8 +4162,30 @@ def train(config, datasets=None):
               f"centres {np.round(_dm, 4).tolist()}")
 
 
+    # GenLabel density bank over learned embeddings. Built once and
+    # refitted at every epoch boundary; see utils/genlabel.py for why the
+    # authors' frozen-encoder recipe could not be used verbatim.
+    genlabel_density = None
+    if getattr(config, 'use_genlabel', False):
+        genlabel_density = EmbeddingClassDensity(
+            num_classes=int(getattr(config, 'num_classes', 4)),
+            dim=int(getattr(config, 'hidden_dim', 1024)),
+            device=device,
+            pca_dim=int(getattr(config, 'genlabel_pca_dim', 0)),
+            shrinkage=float(getattr(config, 'genlabel_shrinkage', 0.0)),
+            tol=float(getattr(config, 'genlabel_tol', 1e-4)),
+            proj_mode=str(getattr(config, 'genlabel_proj_mode', 'within')))
+        print(f"   GenLabel density: dim {genlabel_density.dim} -> "
+              f"pca {genlabel_density.pca_dim or 'none'}, "
+              f"proj {genlabel_density.proj_mode}, "
+              f"shrinkage {genlabel_density.shrinkage:g}, "
+              f"tol {genlabel_density.tol:g}, "
+              f"gamma {float(getattr(config, 'genlabel_gamma', 1.0)):g}")
+
     # Auxiliary prototypicality predictor
     proto_predictor = None
+    proto_predictor_audio = None
+    proto_predictor_text = None
     if getattr(config, 'use_proto_predictor', False):
         proto_hidden = getattr(config, 'proto_predictor_hidden_dim', 256)
         # Fit the class centres and covariances from the training split. The
@@ -3175,6 +4210,80 @@ def train(config, datasets=None):
             consensus_source=str(getattr(config, 'proto_consensus_source', 'class')))
         config._proto_means = _pm
         config._proto_inv_covs = _pi
+        # Empirical log class priors over the same rows the Gaussians were
+        # fitted on. Only consumed when an arm asks for prior-corrected
+        # posteriors; uniform priors remain the default everywhere else.
+        _pc = np.bincount(
+            [int(train_dataset.data[i].get('label4',
+                                           train_dataset.data[i]['label']))
+             for i in train_indices],
+            minlength=n_cls).astype(np.float64)
+        config._proto_log_priors = np.log(_pc / max(1.0, _pc.sum()) + 1e-12)
+        # Smallest annotator consensus on the same rows. Used to map
+        # consensus onto [0, 1] for the trust-weighted target without
+        # introducing a tuned constant.
+        # Calibrated prior offset: the log-prior under which the target
+        # marginal over BLENDS matches the class distribution. Solved by
+        # iterative proportional fitting, so no constant is tuned. Uniform
+        # priors under-inject neutral (0.340 vs 0.453) and over-inject sad
+        # (0.195 vs 0.107); empirical priors overshoot to 0.510.
+        # VAD-free Dirichlet control: concentrations matching q's
+        # class-conditional mean and entropy over blends.
+        config._dirichlet_conc = None
+        if bool(getattr(config, 'muted_mixup_dirichlet', False)):
+            _dr = [train_dataset.data[i] for i in train_indices]
+            _dv = torch.tensor([[r.get('valence', 0.0), r.get('arousal', 0.0),
+                                 r.get('dominance', 0.0)] for r in _dr],
+                               dtype=torch.float32)
+            _dl = torch.tensor([int(r.get('label4', r['label'])) for r in _dr],
+                               dtype=torch.long)
+            _dk = _dv.abs().sum(1) > 0
+            config._dirichlet_conc = solve_dirichlet_match(
+                _dv[_dk], _dl[_dk],
+                torch.as_tensor(_pm, dtype=torch.float32),
+                torch.as_tensor(_pi, dtype=torch.float32),
+                num_classes=n_cls,
+                alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                fold_lambda=bool(getattr(config, 'muted_mixup_fold_lambda', True)),
+                seed=int(getattr(config, 'seed', 42))).numpy()
+            print("   Dirichlet control concentrations:\n%s"
+                  % np.round(config._dirichlet_conc, 3))
+
+        config._proto_cal_prior = None
+        if bool(getattr(config, 'muted_mixup_calibrated_prior', False)):
+            _cal_rows = [train_dataset.data[i] for i in train_indices]
+            _cal_vad = torch.tensor(
+                [[r.get('valence', 0.0), r.get('arousal', 0.0),
+                  r.get('dominance', 0.0)] for r in _cal_rows],
+                dtype=torch.float32)
+            _cal_lab = torch.tensor(
+                [int(r.get('label4', r['label'])) for r in _cal_rows],
+                dtype=torch.long)
+            _cal_keep = _cal_vad.abs().sum(1) > 0
+            _cal_prior = torch.bincount(
+                _cal_lab[_cal_keep], minlength=n_cls).float()
+            _cal_off = solve_calibrated_prior(
+                _cal_vad[_cal_keep], _cal_lab[_cal_keep],
+                torch.as_tensor(_pm, dtype=torch.float32),
+                torch.as_tensor(_pi, dtype=torch.float32),
+                _cal_prior,
+                alpha=float(getattr(config, 'muted_mixup_alpha', 2.0)),
+                fold_lambda=bool(
+                    getattr(config, 'muted_mixup_fold_lambda', True)),
+                seed=int(getattr(config, 'seed', 42)))
+            config._proto_cal_prior = _cal_off.cpu().numpy()
+            print(f"   Calibrated prior offset: "
+                  f"{np.round(config._proto_cal_prior, 4).tolist()}")
+
+        _cons = [float(train_dataset.data[i].get('annot_consensus', 0.0))
+                 for i in train_indices
+                 if float(train_dataset.data[i].get('annot_mask', 0.0)) > 0]
+        config._consensus_min = float(min(_cons)) if _cons else 0.0
+        print(f"   Annotator consensus on fitting rows: min "
+              f"{config._consensus_min:.3f}, mean "
+              f"{(sum(_cons) / max(1, len(_cons))):.3f}")
+        print(f"   Class priors on the fitting rows: "
+              f"{np.round(_pc / max(1.0, _pc.sum()), 4).tolist()}")
         _wscope = str(getattr(config, 'proto_whiten_scope', 'per_class'))
         if proto_metric != 'mahalanobis':
             config._proto_whiten = None
@@ -3182,8 +4291,54 @@ def train(config, datasets=None):
             config._proto_whiten = pooled_whitening(
                 [train_dataset.data[i] for i in train_indices], _pm, n_cls,
                 consensus_q=float(getattr(config, 'proto_centroid_consensus_q', 0.0)))
+        elif str(getattr(config, 'proto_whiten_form', 'cholesky')) == 'diagonal':
+            # Scale-matched control: unit variance per coordinate, but the
+            # class ellipsoid keeps its tilt. Isolates decorrelation from
+            # rescaling when read against the full whitening.
+            config._proto_whiten = diagonal_whitening(
+                [train_dataset.data[i] for i in train_indices], _pm, n_cls,
+                dims=_dims)
+        elif str(getattr(config, 'proto_whiten_form', 'cholesky')) == 'symmetric':
+            # Cholesky factors are triangular, so the whitened components
+            # depend on the order of the VAD axes. The symmetric root does
+            # not, and gives the same Mahalanobis norm.
+            config._proto_whiten = symmetric_whitening_matrices(_pi)
         else:
             config._proto_whiten = whitening_matrices(_pi)
+
+        # Fixed random target table, for the 'randfixed' arm. One draw per
+        # row of the underlying dataset, indexed by sample_index so a given
+        # utterance receives the same target in every epoch. Seeded from the
+        # run seed so the arm is reproducible.
+        if proto_target == 'randfixed':
+            _n_rows = len(train_dataset.data)
+            _rng = np.random.RandomState(int(config.seed) + 9973)
+            config._rand_table = _rng.randn(_n_rows, len(_dims))
+            print(f"   Fixed random target table: {_n_rows} rows x "
+                  f"{len(_dims)}, N(0,1), seeded {int(config.seed) + 9973}")
+
+        # Training-split agreement statistics, for the 'resagree' target.
+        if proto_target in ('resagree', 'vadagree'):
+            _ag_tr = np.array(
+                [train_dataset.data[i].get('annot_consensus', 0.0)
+                 for i in train_indices], dtype=np.float64)
+            _ag_m = _ag_tr[_ag_tr > 0]
+            config._agree_mu = float(_ag_m.mean()) if _ag_m.size else 0.5
+            config._agree_sd = float(_ag_m.std()) if _ag_m.size else 1.0
+            config._agree_sd = max(config._agree_sd, 1e-6)
+            print(f"   Agreement standardisation: mean {config._agree_mu:.4f}, "
+                  f"sd {config._agree_sd:.4f}")
+
+        # Marginal (label-free) whitening, for the 'whitevad' control arm.
+        # Fitted on the same training rows as the class statistics so the two
+        # arms differ only in whether the label is used.
+        if proto_target in ('whitevad', 'vadagree'):
+            _mm, _mw = marginal_whitening(
+                [train_dataset.data[i] for i in train_indices], dims=_dims)
+            config._marginal_mean = _mm
+            config._marginal_whiten = _mw
+            print(f"   Marginal whitening: mean {np.round(_mm, 4).tolist()}, "
+                  f"label-free")
 
         # Pool of real residuals over the whole TRAINING split, for the
         # control variants that draw a target unrelated to the sample.
@@ -3227,11 +4382,15 @@ def train(config, datasets=None):
         elif proto_target == 'resdisp':
             proto_out = len(_dims) * 2
         elif proto_target in ('residual', 'absresidual', 'invresidual',
-                              'rawvad'):
+                              'rawvad', 'whitevad'):
+            proto_out = len(_dims)
+        elif proto_target in ('resagree', 'vadagree'):
+            proto_out = len(_dims) + 1
+        elif proto_target == 'randfixed':
             proto_out = len(_dims)
         elif proto_target == 'allclass':
             proto_out = len(_dims) * n_cls
-        elif proto_target == 'signed':
+        elif proto_target in ('signed', 'signedw'):
             proto_out = 2
         elif proto_target == 'subtype':
             kpc = int(getattr(config, 'aux_vad_clusters_per_class', 2))
@@ -3244,13 +4403,63 @@ def train(config, datasets=None):
         else:
             proto_out = 1
 
+        # Optional SECOND auxiliary task sharing the same module.
+        #
+        # Every arm runs proto_predictor_hidden_dim 0, so the head is a bare
+        # nn.Linear whose output rows share no parameters. One Linear(1024,
+        # N+1) is therefore mathematically identical to two independent heads,
+        # and needs no extra plumbing through the optimizer, the checkpoint or
+        # the evaluation dumps. With a hidden layer the two tasks WOULD share
+        # it, which is a different model, so refuse that case rather than
+        # quietly change what the flag means.
+        _use_expl = bool(getattr(config, 'use_expl_head', False))
+        if _use_expl:
+            if int(proto_hidden) > 0:
+                raise ValueError(
+                    "use_expl_head requires proto_predictor_hidden_dim 0. With "
+                    "a hidden layer the regression and explainability tasks "
+                    "would share it, which is not the intended two-head model.")
+            proto_out += 1
+
         proto_predictor = PrototypicalityPredictor(
             input_dim=config.hidden_dim,
             hidden_dim=proto_hidden,
             output_dim=proto_out,
         ).to(device)
+        if _use_expl:
+            print(f"   Explainability head: +1 output, weight "
+                  f"{getattr(config, 'expl_head_weight', 1.0)}, "
+                  f"shuffle={bool(getattr(config, 'expl_head_shuffle', False))}")
         print(f"   Proto predictor: {config.hidden_dim} -> {proto_hidden} "
               f"-> {proto_out}  (target={proto_target}, metric={proto_metric})")
+
+        # Per-modality auxiliary heads.
+        #
+        # The fused representation is what the classifier reads, so supervising
+        # only it lets the fusion layer satisfy the auxiliary task without
+        # either encoder having to encode prototypicality. Attaching the same
+        # target to the audio and text embeddings separately forces both
+        # streams to carry it.
+        #
+        # NOTE this changes the head count from one to three, so the arm is NOT
+        # capacity matched to uf4_ctrl_pool and needs its own control before a
+        # gain here can be attributed to the per-modality supervision rather
+        # than to the extra parameters and gradient noise.
+        if bool(getattr(config, 'proto_modality_heads', False)):
+            _adim = getattr(model, 'audio_dim', None)
+            _tdim = getattr(model, 'text_dim', None)
+            if _adim and _tdim:
+                proto_predictor_audio = PrototypicalityPredictor(
+                    input_dim=int(_adim), hidden_dim=proto_hidden,
+                    output_dim=proto_out).to(device)
+                proto_predictor_text = PrototypicalityPredictor(
+                    input_dim=int(_tdim), hidden_dim=proto_hidden,
+                    output_dim=proto_out).to(device)
+                print(f"   Per-modality proto heads: audio {_adim} -> "
+                      f"{proto_out}, text {_tdim} -> {proto_out}")
+            else:
+                print("   proto_modality_heads set but modality dims are "
+                      "unavailable; falling back to the fused head only")
         print(f"   Proto predictor weight: {getattr(config, 'proto_predictor_weight', 0.5)}")
         _cq = float(getattr(config, 'proto_centroid_consensus_q', 0.0))
         print(f"   Prototype fitting: consensus_q={_cq}"
@@ -3310,7 +4519,24 @@ def train(config, datasets=None):
     if modality_discriminator is not None:
         param_groups.append({'params': list(modality_discriminator.parameters()), 'lr': config.learning_rate})
     if proto_predictor is not None:
-        param_groups.append({'params': list(proto_predictor.parameters()), 'lr': config.learning_rate})
+        # The auxiliary head is randomly initialised, unlike the pretrained
+        # trunk it sits on, so the trunk's fine-tuning rate is not obviously
+        # the right rate for it. Measured: at the shared 5e-6 a 1024-256-3
+        # head reaches train MSE 0.543 while a 1024-3 head reaches 0.527,
+        # i.e. the higher-capacity head fits WORSE, which is an optimisation
+        # failure rather than a capacity one. Defaults to the shared rate so
+        # every existing arm and fingerprint is unchanged.
+        _pp_lr = float(getattr(config, 'proto_predictor_lr',
+                               config.learning_rate))
+        param_groups.append({'params': list(proto_predictor.parameters()),
+                             'lr': _pp_lr})
+        if _pp_lr != config.learning_rate:
+            print(f"   Proto predictor LR: {_pp_lr:.2e} "
+                  f"(trunk {config.learning_rate:.2e})")
+    for _extra in (proto_predictor_audio, proto_predictor_text):
+        if _extra is not None:
+            param_groups.append({'params': list(_extra.parameters()),
+                                 'lr': config.learning_rate})
     if centroid_tracker is not None and centroid_tracker.mode == "grad":
         centroid_lr = getattr(config, 'learned_centroid_lr', 1e-3)
         param_groups.append({'params': list(centroid_tracker.parameters()), 'lr': centroid_lr})
@@ -3555,6 +4781,8 @@ def train(config, datasets=None):
                 model, stage_loader, criterion, optimizer, device, config,
                 contrastive_criterion, domain_discriminator, domain_adv_loss,
                 proto_predictor, scaler, global_step, current_epoch=global_epoch,
+                proto_predictor_audio=proto_predictor_audio,
+                proto_predictor_text=proto_predictor_text,
                 modality_discriminator=modality_discriminator,
                 centroid_tracker=centroid_tracker,
                 proto_atyp_ctx=proto_atyp_ctx,
@@ -3566,8 +4794,17 @@ def train(config, datasets=None):
                 evidence_pos_weight=evidence_pos_weight,
                 hierarchical_emotion_weights=hierarchical_emotion_weights,
                 salience_stats=salience_stats,
+                genlabel_density=genlabel_density,
             )
             global_step = train_metrics['global_step']
+
+            if genlabel_density is not None:
+                # Refit on the epoch that just ended. A failed refit leaves
+                # the previous densities in place, or keeps the arm on the
+                # vanilla target if none exist yet.
+                ok = genlabel_density.refit()
+                print(f"   GenLabel refit: {'ok' if ok else 'SKIPPED'}"
+                      f" (ready={genlabel_density.ready})")
 
             # Step scheduler
             scheduler.step()
@@ -3855,10 +5092,12 @@ def train(config, datasets=None):
     if bool(getattr(config, 'save_predictions', False)):
         print("\n   Dumping per-sample predictions...")
         _dump_split_predictions(model, val_loader, config, device,
-                                'heldout', use_amp)
+                                'heldout', use_amp,
+                                proto_predictor=proto_predictor)
         for test_loader, test_dataset in zip(test_loaders, test_datasets):
             _dump_split_predictions(model, test_loader, config, device,
-                                    test_dataset.dataset_name, use_amp)
+                                    test_dataset.dataset_name, use_amp,
+                                    proto_predictor=proto_predictor)
 
     # Val confusion matrix (best model)
     if config.task_type == "classification":
