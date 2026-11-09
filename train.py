@@ -25,6 +25,7 @@ import os
 
 from utils.annotator_meta import SUBTYPE_NAMES
 from utils.config import Config, RAW_AUDIO_ENCODERS
+from utils.continuum import load_continuum
 from data.dataset import create_datasets
 from data.collate import vad_collate_fn
 from models.classifier import create_model
@@ -498,6 +499,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     getattr(config, 'realness_weight_floor', 0.25))
                 use_realness = (soft_mode in ('raw', 'realness')
                                 or realness_weight_on)
+                ot_weight = float(getattr(config, 'ot_weight', 0.0))
                 use_salience_weight = getattr(config, 'use_salience_weighting', False)
                 use_vrex = getattr(config, 'use_vrex', False)
 
@@ -671,6 +673,41 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     # loss_primary unset. Combining this arm with those
                     # schemes is refused at setup rather than silently
                     # taking a different reduction.
+                    loss_primary = per_sample_loss.mean()
+                elif soft_mode in ('lowrank', 'kernel'):
+                    # Continuous targets drawn from the label space itself
+                    # rather than from VAD.
+                    #
+                    # lowrank: the panel's distribution projected onto the
+                    # leading principal components of the label
+                    # distribution and reconstructed. The raw distribution
+                    # spends part of every target on directions a
+                    # class-balanced probe found unrecoverable from audio,
+                    # and this removes them. Per utterance, so rows the
+                    # cache misses keep their hard label.
+                    #
+                    # kernel: how often another annotator of the same
+                    # utterance chose each class, given one chose this
+                    # one. Measured, nothing to tune, identical for every
+                    # row of a class, so it covers unanimous rows too and
+                    # carries to corpora with no panel data.
+                    one_hot = F.one_hot(
+                        labels, num_classes=config.num_classes).float()
+                    if soft_mode == 'kernel':
+                        soft_targets = batch['cont_kernel'].to(device).float()
+                    else:
+                        low = batch['cont_lowrank'].to(device).float()
+                        keep = (batch['cont_mask'].to(device).float()
+                                > 0).unsqueeze(1)
+                        soft_targets = torch.where(keep, low, one_hot)
+                    # Guard against a target that does not normalise, which
+                    # would silently rescale this row's loss.
+                    soft_targets = soft_targets / soft_targets.sum(
+                        dim=1, keepdim=True).clamp_min(1e-8)
+                    cls_weights = (criterion.weight
+                                   if hasattr(criterion, 'weight') else None)
+                    per_sample_loss = soft_cross_entropy(logits, soft_targets,
+                                                         cls_weights)
                     loss_primary = per_sample_loss.mean()
                 elif use_realness:
                     # Direction-aware soft labels. A panel that split three
@@ -941,6 +978,33 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         loss_primary = (per_sample_loss * sample_weights).mean()
                     else:
                         loss_primary = per_sample_loss.mean()
+
+                # Transport term: price WHICH wrong class is predicted.
+                #
+                # Cross-entropy reads only the mass on the true class, so
+                # it charges the same for every mistake. Every target-side
+                # arm in this file therefore spent its structure somewhere
+                # the loss is blind to. This charges by distance instead,
+                # using a cost measured from how often annotators
+                # substitute each pair: confusing neutral with sad (0.698)
+                # costs less than confusing happy with angry (1.228).
+                #
+                # Against a one-hot target the transport distance is exact
+                # in closed form, because all mass must move to the true
+                # class: W(p, delta_y) = sum_a p[a] C[a, y]. It is zero at
+                # p = delta_y, so it agrees with cross-entropy at the
+                # optimum and cannot starve a class, which is how the
+                # measured smoothing kernel destroyed sad recall.
+                #
+                # Prediction on record: UAR averages per-class recall, and
+                # recall is unaffected by WHERE a row's errors land. So
+                # this should move F1 and accuracy more than UAR, and a
+                # flat UAR here is the expected result rather than a null.
+                if ot_weight > 0.0 and _ot_cost is not None:
+                    cost_rows = _ot_cost.to(logits.device)[labels]
+                    loss_ot = (F.softmax(logits, dim=1)
+                               * cost_rows).sum(dim=1).mean()
+                    loss_primary = loss_primary + ot_weight * loss_ot
 
                 # Anti-neutral margin: push emotional samples' true logit
                 # past the neutral logit, hardest on the ambiguous ones.
@@ -3160,6 +3224,28 @@ def train(config, datasets=None):
     # Set seed
     set_seed(config.seed)
 
+    # Ground cost for the transport term, loaded once per run. Absent file
+    # means the term is skipped rather than the run failing.
+    _ot_cost = None
+    if float(getattr(config, 'ot_weight', 0.0)) > 0.0:
+        _cont = load_continuum(getattr(config, 'continuum_path', None))
+        if _cont is None:
+            raise FileNotFoundError(
+                "ot_weight is set but analysis/continuum/"
+                "mspp_continuum.npz is missing. Build it with "
+                "python -m analysis.build_continuum_targets")
+        _ot_cost = torch.from_numpy(_cont.ot_cost)
+        print("  Transport term active: ot_weight=%.2f, cost spread %.3f "
+              "to %.3f" % (float(config.ot_weight),
+                           float(_ot_cost[_ot_cost > 0].min()),
+                           float(_ot_cost.max())))
+
+    # Seed diagnostic. Two runs differing only in config.seed produced
+    # bitwise identical logits on the official split, so confirm the seed
+    # actually reached the generators at this point rather than assuming it.
+    print("  SEED DIAG: config.seed=%s torch=%.6f numpy=%.6f"
+          % (config.seed, float(torch.rand(1)), float(np.random.rand())))
+
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"  Using device: {device}")
@@ -3823,6 +3909,17 @@ def train(config, datasets=None):
                 drop_last=True,
                 seed=int(getattr(config, 'seed', 42)),
             )
+            # Seed diagnostic. Runs on the official split came out bitwise
+            # identical across seeds although every component varies with
+            # the seed in isolation, so log what the sampler was actually
+            # built with and the order it actually yields. If these match
+            # across two runs with different config.seed, the data path is
+            # the culprit; if they differ and the results still match, it
+            # is not.
+            _first = next(iter(length_sampler))
+            print(f"  SEED DIAG: config.seed={config.seed} "
+                  f"sampler.seed={length_sampler.seed} "
+                  f"first_batch={_first[:6]}")
             print(f"  Length bucketing enabled: {len(length_sampler)} batches, "
                   f"durations {subset_durs.min():.1f}-{subset_durs.max():.1f}s "
                   f"(mean {subset_durs.mean():.1f}s)")
@@ -3881,6 +3978,16 @@ def train(config, datasets=None):
     # Create model
     print(f"\n  Creating model...")
     model = create_model(config).to(device)
+
+    # Seed diagnostic. Sum the freshly initialised trainable weights. If
+    # this matches across two runs with different config.seed, the model is
+    # not being initialised from the seeded generator, whatever the data
+    # order does.
+    with torch.no_grad():
+        _init_sum = float(sum(float(p.detach().double().sum())
+                              for p in model.parameters()
+                              if p.requires_grad))
+    print("  SEED DIAG: initial trainable weight sum = %.6f" % _init_sum)
     print(f"   Modality: {config.modality}")
     print(f"   Task: {config.task_type}")
     print(f"   Audio encoder: {getattr(config, 'audio_encoder_type', 'preextracted')}")

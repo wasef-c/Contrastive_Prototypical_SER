@@ -44,17 +44,36 @@ class RealnessLookup:
     orders of magnitude more than the file size suggests.
     """
 
-    def __init__(self, path: pathlib.Path, use_placebo: bool = False) -> None:
+    def __init__(self, path: pathlib.Path, use_placebo: bool = False,
+                 gain: float = 1.0, shuffle: bool = False,
+                 shuffle_seed: int = 12345) -> None:
         """Load the map's per-utterance columns.
 
         Args:
             path: npz written by analysis.build_realness_map.
             use_placebo: read the shuffled map's alpha instead of the real
-                one. The placebo permutes each label pair's realness across
-                VAD cells while holding that pair's corpus average fixed,
-                so it matches how soft the targets are on average and
-                removes only the claim that softness belongs in particular
-                places.
+                one. That placebo permutes each label pair's realness
+                across VAD cells while holding the pair's corpus average
+                fixed, so it removes only the claim that softness belongs
+                in particular places. It deliberately preserves which
+                label pair a panel split on, which is why it stays
+                correlated with the real map and makes a weak control at
+                one seed.
+            gain: multiplier on alpha before clipping to [0, 1]. Mean alpha
+                is 0.128 as fitted, so the targets sit close to the hard
+                label and both levers are gentle. Raising the gain tests
+                whether a null result is underpowering rather than the
+                signal being absent.
+            shuffle: permute alpha across covered utterances. This is the
+                higher-power control: the distribution of alpha is
+                preserved exactly, so the arm is matched on how soft the
+                targets are AND on how much the weights vary, while the
+                correlation with the real assignment goes to zero. It asks
+                whether alpha carries any useful per-utterance information
+                at all, rather than the narrower question of whether the
+                spatial part specifically does.
+            shuffle_seed: fixed so the permutation is one controlled
+                assignment rather than noise that differs per run.
         """
         with np.load(path, allow_pickle=True) as z:
             keys = np.asarray(z["keys"]).astype(str)
@@ -63,7 +82,21 @@ class RealnessLookup:
             self.covered = np.asarray(z["covered"]).astype(bool)
             self.split = np.asarray(z["split"]).astype(str)
             self.probs = np.asarray(z["probs"], dtype=np.float32)
+
+        if gain != 1.0:
+            self.alpha = np.clip(self.alpha * float(gain), 0.0, 1.0
+                                 ).astype(np.float32)
+        if shuffle:
+            # Permute within the covered rows only. Including uncovered
+            # rows would move their zeros into covered positions and change
+            # the distribution the control is supposed to match.
+            idx = np.where(self.covered)[0]
+            rng = np.random.RandomState(int(shuffle_seed))
+            self.alpha[idx] = self.alpha[idx][rng.permutation(idx.size)]
+
         self.use_placebo = bool(use_placebo)
+        self.gain = float(gain)
+        self.shuffled = bool(shuffle)
         self.index: Dict[str, int] = {k: i for i, k in enumerate(keys)}
 
     def __len__(self) -> int:
@@ -91,16 +124,19 @@ class RealnessLookup:
         return float(self.alpha[row]), self.probs[row], 1.0
 
 
-_CACHE: Dict[Tuple[str, bool], RealnessLookup] = {}
+_CACHE: Dict[Tuple[str, bool, float, bool], RealnessLookup] = {}
 
 
 def load_realness(path: Optional[pathlib.Path] = None,
-                  use_placebo: bool = False) -> Optional[RealnessLookup]:
-    """Load the lookup, caching one instance per (path, placebo) pair.
+                  use_placebo: bool = False, gain: float = 1.0,
+                  shuffle: bool = False) -> Optional[RealnessLookup]:
+    """Load the lookup, caching one instance per configuration.
 
     Args:
         path: npz to read. Defaults to the official-Train map.
-        use_placebo: read the shuffled map's alpha.
+        use_placebo: read the cell-permuted map's alpha.
+        gain: multiplier on alpha before clipping.
+        shuffle: permute alpha across covered utterances.
 
     Returns:
         A RealnessLookup, or None when the file is absent, so a run
@@ -108,12 +144,13 @@ def load_realness(path: Optional[pathlib.Path] = None,
         training instead of failing.
     """
     target = pathlib.Path(path or DEFAULT_PATH)
-    cache_key = (str(target), bool(use_placebo))
+    cache_key = (str(target), bool(use_placebo), float(gain), bool(shuffle))
     if cache_key in _CACHE:
         return _CACHE[cache_key]
     if not target.exists():
         return None
-    lookup = RealnessLookup(target, use_placebo=use_placebo)
+    lookup = RealnessLookup(target, use_placebo=use_placebo, gain=gain,
+                            shuffle=shuffle)
     _CACHE[cache_key] = lookup
     return lookup
 

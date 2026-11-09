@@ -22,6 +22,7 @@ from utils.frame_cache import (
     write_frame_cache,
 )
 from utils.prototypicality import calculate_difficulty
+from utils.continuum import load_continuum
 from utils.realness import load_realness
 from utils.config import RAW_AUDIO_ENCODERS
 
@@ -397,10 +398,28 @@ class EmotionDataset(Dataset):
                 or bool(getattr(config, "realness_loss_weight", False))):
             realness = load_realness(
                 getattr(config, "realness_map_path", None),
-                bool(getattr(config, "realness_placebo", False)))
+                bool(getattr(config, "realness_placebo", False)),
+                float(getattr(config, "realness_alpha_gain", 1.0)),
+                bool(getattr(config, "realness_shuffle_alpha", False)))
             if realness is None:
                 print("   WARNING: realness map not found; falling back to "
                       "hard labels at full weight")
+
+        # Continuum targets: low-rank soft labels, the substitution kernel,
+        # and the PC coordinates the auxiliary arms regress.
+        continuum = None
+        matched_continuum = 0
+        if (getattr(config, "soft_label_mode", "hard") in ("lowrank",
+                                                           "kernel")
+                or str(getattr(config, "proto_target", "")) == "pc3"):
+            continuum = load_continuum(
+                getattr(config, "continuum_path", None))
+            if continuum is None:
+                raise FileNotFoundError(
+                    "continuum targets requested but "
+                    "analysis/continuum/mspp_continuum.npz is missing. "
+                    "Build it with "
+                    "python -m analysis.build_continuum_targets")
 
         # Preextracted feature column is touched per-row (large nested structs);
         # only grab the whole column when actually needed.
@@ -533,6 +552,17 @@ class EmotionDataset(Dataset):
                 sample["realness_probs"] = annot4
                 sample["realness_mask"] = realness_mask
                 matched_realness += int(realness_mask > 0)
+
+            if continuum is not None:
+                lowrank, pc_coords, cont_mask = continuum.get(key)
+                # The kernel is class-conditional, so it is defined for
+                # every row whether or not the panel data covers it. The
+                # low-rank target is per utterance and is not.
+                sample["cont_lowrank"] = lowrank
+                sample["cont_pc"] = pc_coords
+                sample["cont_mask"] = cont_mask
+                sample["cont_kernel"] = continuum.kernel_target(out_label)
+                matched_continuum += int(cont_mask > 0)
 
             if subtype_meta is not None:
                 row = subtype_meta.row(key) if key is not None else None
@@ -820,6 +850,13 @@ class EmotionDataset(Dataset):
             result["realness_alpha"] = item["realness_alpha"]
             result["realness_probs"] = item["realness_probs"]
             result["realness_mask"] = item["realness_mask"]
+
+        # Continuum targets, present only when an arm asks for them.
+        if "cont_mask" in item:
+            result["cont_lowrank"] = item["cont_lowrank"]
+            result["cont_pc"] = item["cont_pc"]
+            result["cont_kernel"] = item["cont_kernel"]
+            result["cont_mask"] = item["cont_mask"]
 
         # Frame-level: read one row from the memmap. Only this row is
         # paged in, so RAM stays flat regardless of corpus size.

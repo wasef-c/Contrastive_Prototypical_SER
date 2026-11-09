@@ -1,0 +1,316 @@
+<title>Arm Confusion Matrices</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: two bands per corpus, absolute recall then difference from the
+   hard-label baseline, each a row of small 4x4 grids that wrap. Absolute
+   uses one hue light to dark; differences use the project's diverging
+   pair, burnt orange for recall given up and sea green for recall won. */
+:root {
+  --bg: #FAFAFC;
+  --surface: #FFFFFF;
+  --surface-2: #F2F2F7;
+  --rule: #DEDEE7;
+  --ink: #1A1A22;
+  --ink-2: #4A4A58;
+  --ink-3: #74748A;
+  --ramp: #07897A;
+  --gain: #07897A;
+  --loss: #C2410C;
+  --accent: #4F46E5;
+  --on-strong: #FFFFFF;
+  --font-display: "Spectral", Georgia, serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+    --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+    --ramp: #2CA18E; --gain: #2CA18E; --loss: #D4722F; --accent: #8C84F0;
+    --on-strong: #0E0F13;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+  --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+  --ramp: #2CA18E; --gain: #2CA18E; --loss: #D4722F; --accent: #8C84F0;
+  --on-strong: #0E0F13;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap {
+  max-width: 60rem; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.9rem, 5vw, 2.6rem); line-height: 1.12; font-weight: 600; }
+h2 { font-size: clamp(1.2rem, 3vw, 1.5rem); font-weight: 600; }
+h3 { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 500; margin: 0 0 0.45rem; color: var(--ink); }
+p { margin: 0 0 1rem; color: var(--ink-2); }
+p.lede { font-size: 1.08rem; color: var(--ink); }
+strong { color: var(--ink); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; font-variant-numeric: tabular-nums; }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 0.69rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 0.65rem;
+}
+header.hero { border-bottom: 1px solid var(--rule); }
+header.hero .wrap { padding-block: clamp(2.2rem, 6vw, 3.2rem) clamp(1.5rem, 3.5vw, 2rem); }
+section { padding-block: clamp(1.9rem, 4.5vw, 2.6rem); }
+section + section { border-top: 1px solid var(--rule); }
+section.tint { background: var(--surface-2); }
+
+.grid { display: flex; flex-wrap: wrap; gap: 1.15rem; margin-top: 1.3rem; }
+.cmcard { background: var(--surface); border: 1px solid var(--rule); border-radius: 3px; padding: 0.8rem 0.85rem; }
+.cm { display: grid; grid-template-columns: 1.9rem repeat(4, 2.4rem); gap: 2px; }
+.cm .hd {
+  font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3);
+  display: flex; align-items: center; justify-content: center; height: 1.1rem;
+}
+.cm .rh {
+  font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3);
+  display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 0.3rem;
+}
+.cell {
+  height: 2.1rem; border-radius: 2px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+.cell.diag { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.cap { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-3); margin-top: 0.4rem; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.3rem; margin-top: 1rem; font-size: 0.82rem; color: var(--ink-2); align-items: center; }
+.legend b { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 400; }
+.ramp { width: 5rem; height: 0.7rem; border-radius: 2px; flex: none; }
+.sw { width: 0.72rem; height: 0.72rem; border-radius: 2px; flex: none; }
+
+.note { font-size: 0.84rem; color: var(--ink-3); margin-top: 0.9rem; line-height: 1.55; max-width: 64ch; }
+.finding { border-left: 3px solid var(--accent); padding: 0.1rem 0 0.1rem 1.05rem; margin: 1.2rem 0; }
+.finding p { color: var(--ink); margin-bottom: 0.5rem; }
+.finding p:last-child { margin-bottom: 0; }
+.tablewrap { overflow-x: auto; margin-top: 1.1rem; }
+table { border-collapse: collapse; font-size: 0.84rem; width: 100%; }
+th, td { text-align: right; padding: 0.42rem 0.65rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-3); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+td.name { color: var(--ink); }
+footer { border-top: 1px solid var(--rule); }
+footer .wrap { padding-block: 1.8rem 2.5rem; }
+footer p { font-size: 0.82rem; color: var(--ink-3); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Cross-corpus SER / seed 42 / official MSP-Podcast split</p>
+    <h1>Arm confusion matrices</h1>
+    <p class="lede">Five label targets, two evaluation corpora. Rows are the true class, columns the prediction, each row as a percentage of itself &mdash; so the diagonal is recall.</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">IEMOCAP, 5,531 utterances</p>
+    <h2>Where the predictions land</h2>
+    <div class="grid" id="abs-IEMOCAP"></div>
+    <div class="legend">
+      <b><span class="ramp" id="ramp1"></span>0 to 100% of the true-class row</b>
+      <b><span class="sw" style="box-shadow:inset 0 0 0 1.5px var(--accent)"></span>diagonal, the recall</b>
+    </div>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">IEMOCAP, change from the hard-label baseline</p>
+    <h2>What each target moved</h2>
+    <div class="grid" id="dif-IEMOCAP"></div>
+    <div class="legend">
+      <b><span class="sw" style="background:var(--gain)"></span>recall won</b>
+      <b><span class="sw" style="background:var(--loss)"></span>recall given up</b>
+      <b>scale saturates at &plusmn;8 points</b>
+    </div>
+
+    <div class="finding">
+      <p><strong>Every soft target makes the same trade.</strong> The top-left cell rises and the happy diagonal falls: <code>rl_raw</code> takes neutral recall 67.4 &rarr; 71.7 while happy drops 61.3 &rarr; 59.8, and <code>rl_lowrank</code> does the same at 70.5 and 58.6. The gain comes from neutral, not from everywhere.</p>
+      <p><strong>The two &alpha; arms go the other way.</strong> <code>rl_dir</code> and <code>rl_dir_hi</code> drop neutral (65.1 and 61.1) and raise sad (69.5 and 70.3). Same direction as the affect-geometry mixup target, and both lost.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">SAMSEMO, 5,043 utterances</p>
+    <h2>Where the predictions land</h2>
+    <div class="grid" id="abs-SAMSEMO"></div>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">SAMSEMO, change from the hard-label baseline</p>
+    <h2>What each target moved</h2>
+    <div class="grid" id="dif-SAMSEMO"></div>
+
+    <div class="finding">
+      <p><strong>Sad is where SAMSEMO pays.</strong> <code>rl_raw</code> sends 32.3% of sad utterances to neutral against the baseline's 27.6%, and sad recall falls 62.9 &rarr; 58.8. <code>rl_lowrank</code> is milder at 31.5 and 60.2. That is the cost of the neutral gain, and it is larger here than on IEMOCAP.</p>
+      <p>It also matches the substitution kernel measured on the training corpus, where an annotator who said sad was likelier to be answered with neutral (0.425) than with sad (0.385). Sad is the least self-consistent class in the data, and the models inherit that.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Summary</p>
+    <h2>Diagonals side by side</h2>
+    <div class="tablewrap">
+      <table id="diag"></table>
+    </div>
+    <p class="note">One run per arm. On this split every seed produces bitwise identical logits, so these are exact numbers with no variance estimate attached. <code>rl_kernel</code> was still training when this was built.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Raw argmax on saved logits, no calibration. Branch <span class="mono">levers</span>, arms in <span class="mono">configs/class_weight.yaml</span>, predictions under <span class="mono">checkpoints/&lt;arm&gt;_seed42/predictions/</span>. Trained on 58,997 official-Train rows for 8 epochs; neither evaluation corpus is seen during training.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var N = ["neu", "hap", "sad", "ang"];
+  var ARMS = ["rl_hard", "rl_raw", "rl_dir", "rl_dir_hi", "rl_lowrank"];
+  var LBL = {
+    rl_hard: "rl_hard  (baseline)",
+    rl_raw: "rl_raw",
+    rl_dir: "rl_dir",
+    rl_dir_hi: "rl_dir_hi",
+    rl_lowrank: "rl_lowrank"
+  };
+  var CM = {"IEMOCAP":{"rl_hard":[[67.39,15.63,13.47,3.51],[25.67,61.31,8.86,4.16],[25.83,7.1,66.14,0.92],[19.4,21.76,4.08,54.76]],"rl_raw":[[71.72,13.0,12.06,3.22],[28.0,59.84,8.07,4.1],[27.31,6.73,65.22,0.74],[19.58,19.4,4.17,56.84]],"rl_dir":[[65.11,16.63,14.34,3.92],[24.14,62.41,9.41,4.03],[22.42,7.2,69.46,0.92],[18.5,21.67,4.71,55.12]],"rl_dir_hi":[[61.07,19.44,15.87,3.63],[23.53,63.51,8.19,4.77],[20.11,8.3,70.3,1.29],[16.77,24.21,4.99,54.03]],"rl_lowrank":[[70.49,13.29,12.59,3.63],[27.2,58.56,9.96,4.28],[24.45,6.0,68.91,0.65],[20.22,18.5,4.44,56.84]]},"SAMSEMO":{"rl_hard":[[67.15,17.98,7.68,7.18],[25.1,67.61,3.1,4.18],[27.6,4.45,62.91,5.04],[9.52,11.31,2.33,76.84]],"rl_raw":[[71.17,14.32,7.05,7.46],[26.86,65.6,2.38,5.17],[32.34,2.67,58.75,6.23],[9.34,8.98,2.51,79.17]],"rl_dir":[[66.97,17.58,8.09,7.37],[24.79,67.67,3.2,4.34],[26.11,4.45,63.2,6.23],[9.16,11.31,3.23,76.3]],"rl_dir_hi":[[68.14,16.72,8.59,6.55],[24.79,68.44,3.15,3.62],[27.6,7.72,59.64,5.04],[12.39,11.13,3.23,73.25]],"rl_lowrank":[[71.94,13.69,7.28,7.09],[26.96,65.44,2.89,4.7],[31.45,2.97,60.24,5.34],[10.05,9.69,2.51,77.74]]}};
+
+  function css(name) {
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue(name).trim();
+  }
+
+  function build(host, corpus, arm, mode) {
+    var m = CM[corpus][arm];
+    var basem = CM[corpus].rl_hard;
+    var card = document.createElement("div");
+    card.className = "cmcard";
+    var h = document.createElement("h3");
+    h.textContent = LBL[arm];
+    card.appendChild(h);
+    var g = document.createElement("div");
+    g.className = "cm";
+    var corner = document.createElement("div");
+    corner.className = "hd";
+    g.appendChild(corner);
+    N.forEach(function (n) {
+      var d = document.createElement("div");
+      d.className = "hd";
+      d.textContent = n;
+      g.appendChild(d);
+    });
+    for (var i = 0; i < 4; i++) {
+      var rh = document.createElement("div");
+      rh.className = "rh";
+      rh.textContent = N[i];
+      g.appendChild(rh);
+      for (var j = 0; j < 4; j++) {
+        var cell = document.createElement("div");
+        cell.className = "cell" + (i === j ? " diag" : "");
+        var v, a, hue, txt;
+        if (mode === "abs") {
+          v = m[i][j];
+          a = Math.min(v / 100, 1);
+          hue = css("--ramp");
+          txt = v.toFixed(0);
+        } else {
+          v = m[i][j] - basem[i][j];
+          a = Math.min(Math.abs(v) / 8, 1);
+          hue = v >= 0 ? css("--gain") : css("--loss");
+          txt = (v > 0 ? "+" : v < 0 ? "−" : "") +
+            Math.abs(v).toFixed(1);
+          if (Math.abs(v) < 0.05) { txt = "0"; }
+        }
+        cell.style.background = "color-mix(in srgb, " + hue + " " +
+          (a * 100).toFixed(1) + "%, transparent)";
+        cell.style.color = a > 0.55 ? css("--on-strong") : css("--ink");
+        cell.textContent = txt;
+        g.appendChild(cell);
+      }
+    }
+    card.appendChild(g);
+    var cap = document.createElement("div");
+    cap.className = "cap";
+    var dsum = 0;
+    for (var k = 0; k < 4; k++) { dsum += m[k][k]; }
+    cap.textContent = "UAR " + (dsum / 4).toFixed(2);
+    card.appendChild(cap);
+    host.appendChild(card);
+  }
+
+  ["IEMOCAP", "SAMSEMO"].forEach(function (c) {
+    var a = document.getElementById("abs-" + c);
+    ARMS.forEach(function (arm) { build(a, c, arm, "abs"); });
+    var d = document.getElementById("dif-" + c);
+    ARMS.filter(function (x) { return x !== "rl_hard"; })
+      .forEach(function (arm) { build(d, c, arm, "dif"); });
+  });
+
+  document.getElementById("ramp1").style.background =
+    "linear-gradient(90deg, transparent, " + css("--ramp") + ")";
+
+  // Diagonal summary
+  var t = document.getElementById("diag");
+  var thead = document.createElement("thead");
+  var hr = document.createElement("tr");
+  ["arm", "corpus"].concat(N).concat(["UAR"]).forEach(function (x) {
+    var th = document.createElement("th");
+    th.textContent = x;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  t.appendChild(thead);
+  var tb = document.createElement("tbody");
+  ARMS.forEach(function (arm) {
+    ["IEMOCAP", "SAMSEMO"].forEach(function (c) {
+      var m = CM[c][arm];
+      var tr = document.createElement("tr");
+      var td0 = document.createElement("td");
+      td0.className = "name";
+      td0.textContent = c === "IEMOCAP" ? arm : "";
+      tr.appendChild(td0);
+      var td1 = document.createElement("td");
+      td1.textContent = c;
+      tr.appendChild(td1);
+      var s = 0;
+      for (var i = 0; i < 4; i++) {
+        var td = document.createElement("td");
+        td.textContent = m[i][i].toFixed(1);
+        tr.appendChild(td);
+        s += m[i][i];
+      }
+      var tdu = document.createElement("td");
+      tdu.textContent = (s / 4).toFixed(2);
+      tr.appendChild(tdu);
+      tb.appendChild(tr);
+    });
+  });
+  t.appendChild(tb);
+}());
+</script>

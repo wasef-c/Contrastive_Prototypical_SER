@@ -1,0 +1,340 @@
+<title>Label Target Arms</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one anchor table up front, then a card per arm in a vertical
+   stack. Status is carried by a chip, not by colour alone. Palette is the
+   project's: teal for results that held, burnt orange for ones that did
+   not, indigo for structure. */
+:root {
+  --bg: #FAFAFC;
+  --surface: #FFFFFF;
+  --surface-2: #F2F2F7;
+  --rule: #DEDEE7;
+  --ink: #1A1A22;
+  --ink-2: #4A4A58;
+  --ink-3: #74748A;
+  --good: #07897A;
+  --bad: #C2410C;
+  --accent: #4F46E5;
+  --pending: #74748A;
+  --font-display: "Spectral", Georgia, "Times New Roman", serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+    --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+    --good: #2CA18E; --bad: #D4722F; --accent: #8C84F0; --pending: #8A8B9B;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+  --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+  --good: #2CA18E; --bad: #D4722F; --accent: #8C84F0; --pending: #8A8B9B;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap {
+  max-width: 54rem; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 5.5vw, 2.9rem); line-height: 1.1; font-weight: 600; }
+h2 { font-size: clamp(1.3rem, 3.2vw, 1.65rem); font-weight: 600; line-height: 1.25; }
+h3 { font-family: var(--font-mono); font-size: 1rem; font-weight: 500; }
+p { margin: 0 0 1rem; color: var(--ink-2); }
+p.lede { font-size: 1.1rem; color: var(--ink); }
+strong { color: var(--ink); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; font-variant-numeric: tabular-nums; }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 0.7rem;
+}
+header.hero {
+  border-bottom: 1px solid var(--rule);
+  background: radial-gradient(circle at 1px 1px, var(--rule) 1.3px, transparent 1.5px) 0 0 / 24px 24px;
+}
+header.hero .wrap { padding-block: clamp(2.4rem, 7vw, 3.6rem) clamp(1.8rem, 4vw, 2.4rem); }
+section { padding-block: clamp(2rem, 5vw, 2.9rem); }
+section + section { border-top: 1px solid var(--rule); }
+section.tint { background: var(--surface-2); }
+
+.tablewrap { overflow-x: auto; margin-top: 1.4rem; }
+table { border-collapse: collapse; font-size: 0.86rem; width: 100%; }
+th, td { text-align: right; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-3); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; }
+td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+td.name { font-family: var(--font-mono); color: var(--ink); }
+tr.best td { background: color-mix(in srgb, var(--good) 10%, transparent); }
+tr.worst td { background: color-mix(in srgb, var(--bad) 9%, transparent); }
+
+.chip {
+  display: inline-block; font-family: var(--font-mono); font-size: 0.66rem;
+  letter-spacing: 0.09em; text-transform: uppercase; padding: 0.18rem 0.46rem;
+  border-radius: 2px; border: 1px solid currentColor; white-space: nowrap;
+}
+.chip.done { color: var(--good); }
+.chip.fail { color: var(--bad); }
+.chip.run { color: var(--accent); }
+.chip.plan { color: var(--pending); }
+
+.arms { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; margin-top: 1.5rem; }
+.arm { background: var(--surface); padding: 1.15rem 1.25rem; }
+.arm .top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 0.8rem; margin-bottom: 0.6rem; }
+.arm .top h3 { margin-right: auto; }
+.arm .score { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink-3); }
+.arm p { font-size: 0.93rem; margin: 0 0 0.55rem; }
+.arm p:last-child { margin-bottom: 0; }
+.arm .tgt {
+  font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink);
+  background: var(--surface-2); border-left: 2px solid var(--accent);
+  padding: 0.5rem 0.7rem; margin: 0.1rem 0 0.7rem; overflow-x: auto;
+  white-space: nowrap;
+}
+.verdict { font-size: 0.9rem; }
+.verdict b { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; }
+.verdict.good b { color: var(--good); }
+.verdict.bad b { color: var(--bad); }
+.verdict.open b { color: var(--pending); }
+
+.chart { display: grid; gap: 2px; margin-top: 1.3rem; }
+.row { display: grid; grid-template-columns: 7.5rem 1fr 4.2rem; align-items: center; gap: 0.7rem; min-width: 0; }
+.row .rlab { font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-2); min-width: 0; }
+.row .rval { font-family: var(--font-mono); font-size: 0.8rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+.track { position: relative; height: 1.05rem; background: var(--surface-2); border-radius: 2px; min-width: 0; }
+section.tint .track { background: var(--surface); }
+.bar { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+.bar.pos { background: var(--good); }
+.bar.neg { background: var(--bad); }
+.zero { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--ink-3); opacity: 0.5; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.35rem 1.2rem; margin-top: 0.8rem; font-size: 0.8rem; color: var(--ink-2); }
+.legend b { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 400; }
+.sw { width: 0.7rem; height: 0.7rem; border-radius: 2px; flex: none; }
+
+.caveat { border-left: 3px solid var(--bad); padding: 0.1rem 0 0.1rem 1.1rem; margin: 1.3rem 0; }
+.caveat p { color: var(--ink); }
+figcaption, .note { font-size: 0.84rem; color: var(--ink-3); margin-top: 0.8rem; line-height: 1.55; }
+footer { border-top: 1px solid var(--rule); }
+footer .wrap { padding-block: 1.9rem 2.6rem; }
+footer p { font-size: 0.82rem; color: var(--ink-3); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (max-width: 32rem) {
+  .row { grid-template-columns: 1fr 4.2rem; }
+  .row .rlab { grid-column: 1 / -1; }
+}
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Cross-corpus SER / MSP-Podcast official split</p>
+    <h1>Label target arms</h1>
+    <p class="lede">Eight training arms. Identical model, identical data, identical 8 epochs. The only thing that differs is what each one trains a single utterance toward.</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">The anchor</p>
+    <h2>One utterance, eight targets</h2>
+    <p style="margin-top:0.9rem;max-width:62ch"><code>MSP-PODCAST_0016_0352</code> was rated by five annotators: <strong>three said neutral, two said happy</strong>. Every arm sees the same audio and the same five votes. Here is what each one asks the model to produce.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>arm</th><th>neutral</th><th>happy</th><th>sad</th><th>angry</th><th>also</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="name">rl_hard</td><td>1.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>&ndash;</td></tr>
+          <tr class="best"><td class="name">rl_raw</td><td>0.600</td><td>0.400</td><td>0.000</td><td>0.000</td><td>&ndash;</td></tr>
+          <tr><td class="name">rl_dir</td><td>0.879</td><td>0.121</td><td>0.000</td><td>0.000</td><td>loss weight 0.55</td></tr>
+          <tr class="worst"><td class="name">rl_dir_hi</td><td>0.600</td><td>0.400</td><td>0.000</td><td>0.000</td><td>&alpha; saturated</td></tr>
+          <tr><td class="name">rl_lowrank</td><td>0.589</td><td>0.391</td><td>0.006</td><td>0.014</td><td>&ndash;</td></tr>
+          <tr><td class="name">rl_kernel</td><td>0.632</td><td>0.178</td><td>0.134</td><td>0.056</td><td>&ndash;</td></tr>
+          <tr><td class="name">rl_pc3</td><td>1.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>regress (&minus;0.156, 0.850, 0.290)</td></tr>
+          <tr><td class="name">rl_vad3</td><td>1.000</td><td>0.000</td><td>0.000</td><td>0.000</td><td>regress VAD</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">This utterance sits in a VAD cell where neutral/happy confusion is 30% real, so its &alpha; is 0.303. Under <code>rl_dir_hi</code>'s gain of 4 that clips to 1.0, which is why the strength arm's target collapses onto <code>rl_raw</code>'s here. At gain 4, 19.5% of covered rows saturate like this.</p>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">Results so far</p>
+    <h2>IEMOCAP UAR against the hard-label baseline</h2>
+    <div class="chart" id="chart"></div>
+    <div class="legend">
+      <b><span class="sw" style="background:var(--good)"></span>better than hard labels</b>
+      <b><span class="sw" style="background:var(--bad)"></span>worse</b>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>arm</th><th>IEMOCAP UAR</th><th>Acc</th><th>F1</th><th>SAMSEMO UAR</th><th>Acc</th><th>F1</th></tr></thead>
+        <tbody>
+          <tr><td class="name">rl_hard</td><td>62.40</td><td>62.83</td><td>63.32</td><td>68.63</td><td>68.11</td><td>65.36</td></tr>
+          <tr class="best"><td class="name">rl_raw</td><td>63.41</td><td>63.97</td><td>64.47</td><td>68.67</td><td>69.09</td><td>65.70</td></tr>
+          <tr><td class="name">rl_dir</td><td>63.03</td><td>63.17</td><td>63.70</td><td>68.53</td><td>68.02</td><td>64.98</td></tr>
+          <tr class="worst"><td class="name">rl_dir_hi</td><td>62.23</td><td>62.19</td><td>62.78</td><td>67.37</td><td>68.25</td><td>64.59</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Every figure is one run. See the caveats at the foot of the page before reading differences as effects.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Each arm</p>
+    <h2>What it trains on, and why</h2>
+
+    <div class="arms">
+
+      <div class="arm">
+        <div class="top"><h3>rl_hard</h3><span class="chip done">done</span><span class="score">62.40 / 68.63</span></div>
+        <div class="tgt">target = one-hot on the majority vote</div>
+        <p>The baseline. It exists because these arms use MSP-Podcast's official Train/Development split, which costs 46% of the angry four-class rows and makes every other arm in the config an invalid reference.</p>
+        <p class="verdict open"><b>role</b> &nbsp;reference point, nothing more.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_raw</h3><span class="chip done">done</span><span class="score">63.41 / 68.67</span></div>
+        <div class="tgt">target = the five annotators' distribution, as recorded</div>
+        <p>Tests the simplest form of "labels are continuous": keep the panel's spread instead of forcing it to a spike. The strongest arm so far, +1.01 UAR on IEMOCAP and +0.97 accuracy on SAMSEMO.</p>
+        <p>It also pushes neutral recall up about 4 points on both corpora, paid for by happy and sad. That is the opposite direction from the affect-geometry mixup target, which moved recall out of neutral.</p>
+        <p class="verdict good"><b>works</b> &nbsp;but not novel. Label-distribution learning for speech emotion is published.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_dir</h3><span class="chip fail">failed</span><span class="score">63.03 / 68.53</span></div>
+        <div class="tgt">target = (1 &minus; &alpha;) &middot; hard + &alpha; &middot; distribution, and loss weight &prop; &alpha;</div>
+        <p>&alpha; is the share of a panel's own disagreement that runs along label-pair axes carrying real structure <em>where that utterance sits in VAD space</em>. The idea: trust the panel where its split is meaningful, collapse it where the annotators are simply unreliable about that distinction.</p>
+        <p>It lost to <code>rl_raw</code> on all six comparisons, two corpora by three metrics. Per-class recall shows the levers firing as designed, moving recall out of neutral and into sad, so the machinery worked and the allocation it produced was wrong.</p>
+        <p class="verdict bad"><b>failed</b> &nbsp;trusting every panel equally beats trusting them by the map.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_dir_hi</h3><span class="chip fail">failed</span><span class="score">62.23 / 67.37</span></div>
+        <div class="tgt">as rl_dir, with &alpha; &times; 4 and the weight floor at 0</div>
+        <p>Ran to test whether <code>rl_dir</code>'s null was underpowering. Mean &alpha; rises 0.128 to 0.456, with 37% of rows effectively hard and 20% fully soft, so the arm separates the two populations instead of nudging everything.</p>
+        <p>It came out the <strong>worst arm on UAR on both corpora</strong>, below even hard labels. Turning the mechanism up made it worse, which is the one result underpowering cannot explain.</p>
+        <p class="verdict bad"><b>decisive</b> &nbsp;dose-response runs the wrong way. &alpha; mis-allocates trust.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_lowrank</h3><span class="chip run">running</span><span class="score">&mdash;</span></div>
+        <div class="tgt">target = distribution projected onto 3 principal components, reconstructed</div>
+        <p>The panel's distribution sits near a low-dimensional surface in the label simplex. On a class-balanced probe, audio recovers its first three directions at R&sup2; 0.64, 0.50 and 0.30, while the fourth and fifth come back negative. So part of every <code>rl_raw</code> target points somewhere the signal cannot go.</p>
+        <p>One line different from the arm that works, and motivated by a measurement rather than a hunch.</p>
+        <p class="verdict open"><b>caveat</b> &nbsp;it makes targets <em>softer</em>, not cleaner: entropy 0.708 against raw 0.486, and the argmax moves on 11.8% of rows. If it beats <code>rl_raw</code>, softness alone is a live explanation and the projection gets no credit without a matched-entropy control.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_kernel</h3><span class="chip run">queued</span><span class="score">&mdash;</span></div>
+        <div class="tgt">target = P(another annotator says b | one said a)</div>
+        <p>Label smoothing whose shape is measured instead of uniform. A unanimous angry utterance gets mass on the classes annotators actually substitute for angry, not spread evenly over everything.</p>
+        <p>Two properties no other arm here has. It covers <strong>every</strong> row including unanimous ones, where per-utterance targets reach only 78%. And it is a single 4&times;4 matrix with nothing to tune, so it transfers to corpora with no annotator panels at all.</p>
+        <p>The measured kernel has average smoothing strength 0.448, and sad's row is the striking one: given one annotator said sad, another is likelier to say <strong>neutral</strong> (0.425) than sad (0.385).</p>
+        <p class="verdict open"><b>best story</b> &nbsp;the only arm whose mechanism would survive outside this corpus.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_pc3</h3><span class="chip plan">planned</span><span class="score">&mdash;</span></div>
+        <div class="tgt">hard label + auxiliary head regressing the 3-d PC position</div>
+        <p>Keeps the classifier and adds the continuum as a second task. The justification is direct: audio predicts <strong>PC1 at R&sup2; 0.641, better than it predicts valence at 0.598</strong>. PC1 is the neutral-happy contrast, which carries 36% of annotator variance and is the direction VAD sees worst.</p>
+        <p class="verdict open"><b>next</b> &nbsp;the first arm to treat the continuum as a target rather than as a relabelling.</p>
+      </div>
+
+      <div class="arm">
+        <div class="top"><h3>rl_vad3</h3><span class="chip plan">planned</span><span class="score">&mdash;</span></div>
+        <div class="tgt">hard label + auxiliary head regressing valence, arousal, dominance</div>
+        <p>Identical to <code>rl_pc3</code> in every other respect. Without it, any gain from <code>rl_pc3</code> reads as "adding a 3-d auxiliary regression helps", which is weaker and already known.</p>
+        <p class="verdict open"><b>control</b> &nbsp;runs after <code>rl_pc3</code>, not before.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">Before reading anything above as an effect</p>
+    <h2>Three caveats</h2>
+
+    <div class="caveat">
+      <p><strong>Every arm is one run.</strong> On the official split, changing the seed produces <em>bitwise identical</em> logits &mdash; max absolute difference 0.0, final train loss matching to five decimals. The default split draws train/validation with the run seed, so seeds there train on different rows; the official split fixes membership, and nothing else in training contributes measurable variance.</p>
+    </div>
+
+    <p>That has an odd consequence worth keeping straight. A paired comparison between two arms carries <em>no</em> run-to-run noise, so the differences above are exact. But there is also no way to estimate how much any of them depends on the particular initialisation, which is the first thing a reviewer asks. Setting <code>train_subsample_frac: 0.9</code> would restore real variance, since the subsample is drawn with the run seed.</p>
+
+    <div class="caveat">
+      <p><strong>Not comparable to the mixup table.</strong> The official split drops 46% of the angry four-class rows, 27% of happy and sad. Every number here lives in its own family, which is why <code>rl_hard</code> exists.</p>
+    </div>
+
+    <div class="caveat">
+      <p><strong>The R&sup2; figures come from a model trained on hard labels.</strong> Those embeddings were optimised to discard within-class variation, which is partly what PC1 represents. That biases the predictability test <em>against</em> the continuum, so 0.641 is encouraging &mdash; but predicting something well and that something helping classification are different claims.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Branch <span class="mono">levers</span>. Targets built by <span class="mono">analysis/build_continuum_targets.py</span> and <span class="mono">analysis/build_realness_map.py</span>, both fitted on the official Train split alone so no validation row influences a training target. Arms defined in <span class="mono">configs/class_weight.yaml</span>. Training 58,997 rows, validation 21,944, 8 epochs, seed 42.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var base = 62.40;
+  var rows = [
+    { k: "rl_raw", v: 63.41 },
+    { k: "rl_dir", v: 63.03 },
+    { k: "rl_hard", v: 62.40 },
+    { k: "rl_dir_hi", v: 62.23 }
+  ];
+  var scale = 1.2;
+  var host = document.getElementById("chart");
+  rows.forEach(function (r) {
+    var d = r.v - base;
+    var wrap = document.createElement("div");
+    wrap.className = "row";
+    var lab = document.createElement("div");
+    lab.className = "rlab";
+    lab.textContent = r.k;
+    var track = document.createElement("div");
+    track.className = "track";
+    var zero = document.createElement("div");
+    zero.className = "zero";
+    zero.style.left = "50%";
+    track.appendChild(zero);
+    if (Math.abs(d) > 1e-9) {
+      var bar = document.createElement("div");
+      bar.className = "bar " + (d > 0 ? "pos" : "neg");
+      var frac = Math.min(Math.abs(d) / scale, 1) * 50;
+      if (d > 0) { bar.style.left = "50%"; } else { bar.style.right = "50%"; }
+      bar.style.width = frac + "%";
+      track.appendChild(bar);
+    }
+    var val = document.createElement("div");
+    val.className = "rval";
+    val.textContent = (d > 0 ? "+" : d < 0 ? "−" : "") +
+      Math.abs(d).toFixed(2);
+    wrap.appendChild(lab);
+    wrap.appendChild(track);
+    wrap.appendChild(val);
+    host.appendChild(wrap);
+  });
+}());
+</script>

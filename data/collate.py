@@ -39,6 +39,7 @@ def vad_collate_fn(batch):
     has_label4 = 'label4' in batch[0]
     has_annot = 'annot_mask' in batch[0]
     has_realness = 'realness_mask' in batch[0]
+    has_cont = 'cont_mask' in batch[0]
 
     if has_features:
         collated['features'] = []
@@ -65,6 +66,11 @@ def vad_collate_fn(batch):
         collated['realness_alpha'] = []
         collated['realness_probs'] = []
         collated['realness_mask'] = []
+    if has_cont:
+        collated['cont_lowrank'] = []
+        collated['cont_pc'] = []
+        collated['cont_kernel'] = []
+        collated['cont_mask'] = []
     has_sample_index = 'sample_index' in batch[0]
     if has_sample_index:
         collated['sample_index'] = []
@@ -113,6 +119,11 @@ def vad_collate_fn(batch):
             collated['realness_alpha'].append(item['realness_alpha'])
             collated['realness_probs'].append(item['realness_probs'])
             collated['realness_mask'].append(item['realness_mask'])
+        if has_cont:
+            collated['cont_lowrank'].append(item['cont_lowrank'])
+            collated['cont_pc'].append(item['cont_pc'])
+            collated['cont_kernel'].append(item['cont_kernel'])
+            collated['cont_mask'].append(item['cont_mask'])
         if has_sample_index:
             collated['sample_index'].append(item['sample_index'])
 
@@ -146,6 +157,19 @@ def vad_collate_fn(batch):
         )
         collated['annot_mask'] = torch.tensor(
             collated['annot_mask'], dtype=torch.float32,
+        )
+    if has_cont:
+        collated['cont_lowrank'] = torch.tensor(
+            np.stack(collated['cont_lowrank']), dtype=torch.float32,
+        )
+        collated['cont_pc'] = torch.tensor(
+            np.stack(collated['cont_pc']), dtype=torch.float32,
+        )
+        collated['cont_kernel'] = torch.tensor(
+            np.stack(collated['cont_kernel']), dtype=torch.float32,
+        )
+        collated['cont_mask'] = torch.tensor(
+            collated['cont_mask'], dtype=torch.float32,
         )
     if has_realness:
         collated['realness_alpha'] = torch.tensor(

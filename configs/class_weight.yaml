@@ -5314,3 +5314,191 @@ experiments:
     realness_loss_weight: true
     realness_weight_floor: 0.25
     realness_placebo: true
+
+  # Strength probe. rl_dir came in 6 of 6 negative against rl_raw on seed 42,
+  # and the obvious suspect is power rather than principle: alpha averages
+  # 0.128 as fitted, so the target sits close to the hard label, and the
+  # weight floor of 0.25 leaves a pure noise-axis row at a quarter of full
+  # influence. This raises both.
+  #
+  # Gain 4.0 takes mean alpha to 0.456, with 19.5 percent of covered rows
+  # fully soft and 37.4 percent effectively hard, so the arm actually
+  # separates the two populations instead of nudging everything. Floor 0.0
+  # lets a noise-axis row fall to near-zero weight.
+  #
+  # Read it against rl_raw, not rl_hard. Note also that IEMOCAP UAR has so
+  # far been monotone in mean alpha (62.40 at 0, 63.03 at 0.128, 63.41 at
+  # 1.0), so a result near 63.2 here is what plain softness predicts and
+  # would not be evidence for the map. Only beating rl_raw is.
+  - <<: *template
+    name: "rl_dir_hi"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "realness"
+    realness_loss_weight: true
+    realness_weight_floor: 0.0
+    realness_alpha_gain: 4.0
+
+  # ---- Continuous targets from the label space itself ----
+  #
+  # The panel's label distribution sits near a low-dimensional surface in
+  # the label simplex, and on a class-balanced probe the audio recovers its
+  # first three principal directions at R^2 0.64, 0.50 and 0.30 while the
+  # fourth and fifth come back negative. PC1, the neutral-happy contrast,
+  # is predicted BETTER than valence (0.598). So the continuum is in the
+  # signal, and these arms train on it.
+  #
+  # Read against rl_raw (IEMOCAP 63.41 UAR) and rl_hard (62.40), both at 8
+  # epochs on the same official split.
+
+  # The raw distribution minus the directions audio cannot carry. One line
+  # different from rl_raw. Risk on record: rank 3 keeps 76.1 percent of the
+  # variance on the natural class distribution and moves the argmax on
+  # 11.4 percent of rows, so this is denoising if those directions are
+  # noise and corruption if they are not.
+  - <<: *template
+    name: "rl_lowrank"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "lowrank"
+
+  # Measured label smoothing: given one annotator chose a, how often
+  # another annotator of the SAME utterance chose b. Nothing to tune, and
+  # unlike every per-utterance target it covers unanimous rows and needs no
+  # panel data at test time, so it transfers. Average smoothing strength is
+  # 0.448, and sad's row is the striking one: another annotator is likelier
+  # to say neutral (0.425) than sad (0.385).
+  - <<: *template
+    name: "rl_kernel"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "kernel"
+
+  # Seed diagnostic. One epoch on a tenth of the data, so two seeds cost
+  # minutes instead of five hours. Exists only to compare the three SEED
+  # DIAG probes printed at startup; its scores are meaningless.
+  - <<: *template
+    name: "rl_seeddiag"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    num_epochs: 1
+    train_subsample_frac: 0.1
+
+  # Second seed diagnostic: one epoch on the FULL training split. The first
+  # diagnostic varied the seed AND the 10 percent subsample, which is itself
+  # seed-drawn, so it could not separate "seeds vary" from "subsampling
+  # varies". This removes the subsample and leaves only the seed.
+  - <<: *template
+    name: "rl_seeddiag_full"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    num_epochs: 1
+    train_subsample_frac: 1.0
+
+  # Variance arms, used only if the diagnostic shows the seed alone does
+  # not move training. train_subsample_frac is drawn with the run seed, so
+  # each seed trains on a different nine tenths and the spread of their
+  # scores is the noise level. Costs 10 percent of the data, so these are
+  # comparable to each other and NOT to the full-data arms above.
+  - <<: *template
+    name: "rl_hard_s9"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    train_subsample_frac: 0.9
+
+  - <<: *template
+    name: "rl_lowrank_s9"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "lowrank"
+    train_subsample_frac: 0.9
+
+  # ---- Transport loss: price WHICH wrong class, not just how wrong ----
+  #
+  # Every target-side arm above edits the target of a fixed 4-way softmax.
+  # Cross-entropy reads only the mass on the true class, so it charges the
+  # same for every mistake and structure placed in the target is largely
+  # discarded. These arms leave the target alone and change the pricing.
+  #
+  # Cost is measured from annotator substitution on official Train, mean
+  # off-diagonal normalised to 1.0:
+  #        neu/sad 0.698   neu/hap 0.719   neu/ang 1.029
+  #        hap/sad 1.124   sad/ang 1.203   hap/ang 1.228
+  # So the pairs people actually confuse cost least. Spread is only 1.76x,
+  # so expect a gentle effect.
+  #
+  # Against a one-hot target the transport distance is exact in closed
+  # form: W(p, delta_y) = sum_a p[a] C[a, y], zero at p = delta_y. It
+  # therefore agrees with cross-entropy at the optimum and cannot starve a
+  # class, which is how rl_kernel took sad recall to 2.7 percent.
+  #
+  # PREDICTION ON RECORD: UAR averages per-class recall, and a row's recall
+  # does not depend on where that row's errors land. This term only moves
+  # error structure, so it should show up in F1 and accuracy and NOT in
+  # UAR. Flat UAR here is the expected result, not a null. Read F1 first.
+  #
+  # Two strengths, because the dose-response is what made rl_dir_hi
+  # informative: if 2.0 moves nothing that 0.5 moved, the term is inert.
+  - <<: *template
+    name: "rl_ot"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    train_subsample_frac: 0.9
+    ot_weight: 0.5
+
+  - <<: *template
+    name: "rl_ot_hi"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    train_subsample_frac: 0.9
+    ot_weight: 2.0
