@@ -70,6 +70,7 @@ def vad_collate_fn(batch):
         collated['cont_lowrank'] = []
         collated['cont_pc'] = []
         collated['cont_kernel'] = []
+        collated['cont_smooth'] = []
         collated['cont_mask'] = []
     has_sample_index = 'sample_index' in batch[0]
     if has_sample_index:
@@ -123,6 +124,7 @@ def vad_collate_fn(batch):
             collated['cont_lowrank'].append(item['cont_lowrank'])
             collated['cont_pc'].append(item['cont_pc'])
             collated['cont_kernel'].append(item['cont_kernel'])
+            collated['cont_smooth'].append(item['cont_smooth'])
             collated['cont_mask'].append(item['cont_mask'])
         if has_sample_index:
             collated['sample_index'].append(item['sample_index'])
@@ -167,6 +169,9 @@ def vad_collate_fn(batch):
         )
         collated['cont_kernel'] = torch.tensor(
             np.stack(collated['cont_kernel']), dtype=torch.float32,
+        )
+        collated['cont_smooth'] = torch.tensor(
+            np.stack(collated['cont_smooth']), dtype=torch.float32,
         )
         collated['cont_mask'] = torch.tensor(
             collated['cont_mask'], dtype=torch.float32,

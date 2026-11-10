@@ -410,7 +410,8 @@ class EmotionDataset(Dataset):
         continuum = None
         matched_continuum = 0
         if (getattr(config, "soft_label_mode", "hard") in ("lowrank",
-                                                           "kernel")
+                                                           "kernel",
+                                                           "smooth")
                 or str(getattr(config, "proto_target", "")) == "pc3"):
             continuum = load_continuum(
                 getattr(config, "continuum_path", None))
@@ -562,6 +563,7 @@ class EmotionDataset(Dataset):
                 sample["cont_pc"] = pc_coords
                 sample["cont_mask"] = cont_mask
                 sample["cont_kernel"] = continuum.kernel_target(out_label)
+                sample["cont_smooth"] = continuum.smooth_row(key)[0]
                 matched_continuum += int(cont_mask > 0)
 
             if subtype_meta is not None:
@@ -856,6 +858,7 @@ class EmotionDataset(Dataset):
             result["cont_lowrank"] = item["cont_lowrank"]
             result["cont_pc"] = item["cont_pc"]
             result["cont_kernel"] = item["cont_kernel"]
+            result["cont_smooth"] = item["cont_smooth"]
             result["cont_mask"] = item["cont_mask"]
 
         # Frame-level: read one row from the memmap. Only this row is

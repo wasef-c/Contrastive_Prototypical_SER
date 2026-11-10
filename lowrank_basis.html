@@ -1,0 +1,395 @@
+<title>Low-Rank Label Basis</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: the construction as a numbered pipeline (it really is a
+   sequence), then two signed heatmaps - loadings against labels, and the
+   components against VAD. Teal for positive, burnt orange for negative,
+   matching the project's other pages. */
+:root {
+  --bg: #FAFAFC;
+  --surface: #FFFFFF;
+  --surface-2: #F2F2F7;
+  --rule: #DEDEE7;
+  --ink: #1A1A22;
+  --ink-2: #4A4A58;
+  --ink-3: #74748A;
+  --pos: #07897A;
+  --neg: #C2410C;
+  --accent: #4F46E5;
+  --on-strong: #FFFFFF;
+  --font-display: "Spectral", Georgia, serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+    --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+    --pos: #2CA18E; --neg: #D4722F; --accent: #8C84F0; --on-strong: #0E0F13;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14151A; --surface: #1C1D24; --surface-2: #23242D;
+  --rule: #32343F; --ink: #EDEDF2; --ink-2: #B6B7C4; --ink-3: #8A8B9B;
+  --pos: #2CA18E; --neg: #D4722F; --accent: #8C84F0; --on-strong: #0E0F13;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap {
+  max-width: 52rem; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.95rem, 5vw, 2.7rem); line-height: 1.12; font-weight: 600; }
+h2 { font-size: clamp(1.25rem, 3vw, 1.55rem); font-weight: 600; line-height: 1.25; }
+h3 { font-family: var(--font-mono); font-size: 0.86rem; font-weight: 500; margin: 0 0 0.4rem; }
+p { margin: 0 0 1rem; color: var(--ink-2); }
+p.lede { font-size: 1.1rem; color: var(--ink); }
+strong { color: var(--ink); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; font-variant-numeric: tabular-nums; }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 0.69rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-3); margin: 0 0 0.65rem;
+}
+header.hero { border-bottom: 1px solid var(--rule); }
+header.hero .wrap { padding-block: clamp(2.2rem, 6vw, 3.2rem) clamp(1.6rem, 3.5vw, 2.1rem); }
+section { padding-block: clamp(1.9rem, 4.5vw, 2.7rem); }
+section + section { border-top: 1px solid var(--rule); }
+section.tint { background: var(--surface-2); }
+
+/* Pipeline steps: a real sequence, so numbers earn their place. */
+.steps { display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; margin-top: 1.4rem; }
+.step { background: var(--surface); padding: 1rem 1.15rem; display: grid; grid-template-columns: 1.7rem 1fr; gap: 0.9rem; }
+.step .n { font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent); padding-top: 0.15rem; }
+.step p { margin: 0 0 0.4rem; font-size: 0.93rem; }
+.step p:last-child { margin-bottom: 0; }
+.step .eq {
+  font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink);
+  background: var(--surface-2); border-left: 2px solid var(--accent);
+  padding: 0.45rem 0.65rem; margin: 0.35rem 0 0.5rem; overflow-x: auto;
+  white-space: nowrap;
+}
+
+.heat { display: grid; gap: 2px; margin-top: 1.2rem; overflow-x: auto; }
+.hrow { display: grid; align-items: center; gap: 2px; }
+.hrow.labels9 { grid-template-columns: 5.6rem repeat(3, minmax(3.4rem, 4.6rem)); }
+.hrow.vad3 { grid-template-columns: 5.6rem repeat(3, minmax(4.2rem, 5.6rem)); }
+.hlab { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink-2); padding-right: 0.4rem; }
+.hhd { font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-3); text-align: center; }
+.hcell {
+  height: 2rem; border-radius: 2px; display: flex; align-items: center;
+  justify-content: center; font-family: var(--font-mono); font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+.legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.3rem; margin-top: 0.9rem; font-size: 0.8rem; color: var(--ink-2); align-items: center; }
+.legend b { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 400; }
+.sw { width: 0.72rem; height: 0.72rem; border-radius: 2px; flex: none; }
+
+.tablewrap { overflow-x: auto; margin-top: 1.1rem; }
+table { border-collapse: collapse; font-size: 0.85rem; width: 100%; }
+th, td { text-align: right; padding: 0.44rem 0.68rem; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-3); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-2); }
+td.name { color: var(--ink); }
+tr.hl td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.finding { border-left: 3px solid var(--accent); padding: 0.1rem 0 0.1rem 1.05rem; margin: 1.25rem 0; }
+.finding p { color: var(--ink); margin-bottom: 0.5rem; }
+.finding p:last-child { margin-bottom: 0; }
+.caveat { border-left: 3px solid var(--neg); padding: 0.1rem 0 0.1rem 1.05rem; margin: 1.25rem 0; }
+.caveat p { color: var(--ink); }
+.note { font-size: 0.84rem; color: var(--ink-3); margin-top: 0.85rem; line-height: 1.55; max-width: 64ch; }
+footer { border-top: 1px solid var(--rule); }
+footer .wrap { padding-block: 1.8rem 2.5rem; }
+footer p { font-size: 0.82rem; color: var(--ink-3); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">rl_lowrank / MSP-Podcast official Train, 84,260 utterances</p>
+    <h1>The low-rank label basis</h1>
+    <p class="lede">The target is built from annotator votes alone. VAD appears nowhere in it &mdash; and the largest direction in the vote data is the one VAD recovers least well, though it does recover about a third of it.</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Does it use VAD?</p>
+    <h2>No, at any point</h2>
+    <p style="margin-top:0.9rem;max-width:64ch">The basis is fitted to the nine-way distribution of annotator votes. Valence, arousal and dominance are not inputs to the fit, not inputs to the target, and not inputs to the model in this arm &mdash; <code>use_proto_predictor</code>, <code>use_muted_mixup</code> and <code>use_vad_soft_labels</code> are all off.</p>
+
+    <div class="finding">
+      <p>That is worth sitting with, because it inverts the project's premise. Every arm that used VAD lost: the affect-geometry mixup family, and <code>rl_dir</code> and <code>rl_dir_hi</code>, whose trust weights were conditioned on VAD cells. The arm that works ignores VAD completely and reads only the structure of the votes.</p>
+      <p>Not using VAD is a fact about the arm. It is not evidence that the basis is independent of VAD, which is a separate question and is answered below &mdash; less favourably.</p>
+    </div>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">The construction</p>
+    <h2>Four steps, no free parameters except the rank</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <div>
+          <h3>Start from the votes</h3>
+          <p>Five annotators rated <code>MSP-PODCAST_0016_0352</code>: three neutral, two happy. As proportions over the nine labels that is a point in a nine-dimensional simplex.</p>
+          <div class="eq">p = [0.60, 0.40, 0, 0, 0, 0, 0, 0, 0]</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <div>
+          <h3>Find the surface those points lie on</h3>
+          <p>Across 84,260 official-Train utterances the vote vectors do not fill all nine dimensions. Principal components of their covariance give the directions they actually vary along. Three components hold <strong>76.1%</strong> of the variance.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <div>
+          <h3>Project and reconstruct</h3>
+          <p>Keep only the first three directions, then map back to the nine labels. Anything the votes did outside that subspace is discarded.</p>
+          <div class="eq">p' = mean + (p &minus; mean) V&#8323; V&#8323;&#7488;</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="n">4</div>
+        <div>
+          <h3>Renormalise over the four trained classes</h3>
+          <p>The classifier has four outputs, so the reconstruction is restricted to neutral, happy, sad and angry and rescaled to sum to one. That becomes the soft target.</p>
+          <div class="eq">target = [0.589, 0.391, 0.006, 0.014]</div>
+        </div>
+      </div>
+    </div>
+    <p class="note">The rank is the only choice, and it was set by a separate measurement rather than tuned: on a class-balanced probe, audio recovered the first three directions and not the fourth or fifth.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What the three directions are</p>
+    <h2>Loadings on each label</h2>
+    <div class="heat" id="loadings"></div>
+    <div class="legend">
+      <b><span class="sw" style="background:var(--pos)"></span>positive loading</b>
+      <b><span class="sw" style="background:var(--neg)"></span>negative loading</b>
+      <b>saturates at &plusmn;0.8</b>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>component</th><th>variance</th><th>reads as</th></tr></thead>
+        <tbody>
+          <tr class="hl"><td class="name">PC1</td><td>38.6%</td><td style="text-align:left">Neutral &minus;0.77 against Happy +0.63 &mdash; how far toward happy, away from neutral</td></tr>
+          <tr><td class="name">PC2</td><td>23.9%</td><td style="text-align:left">Happy +0.65 and Neutral +0.49 against Angry &minus;0.48 &mdash; pleasant versus hostile</td></tr>
+          <tr><td class="name">PC3</td><td>13.6%</td><td style="text-align:left">Sad &minus;0.78 against Angry +0.61 &mdash; withdrawn versus confrontational</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The five rarer labels &mdash; Contempt, Surprise, Disgust, Fear, Other &mdash; load at 0.13 or below on every component. The structure is carried almost entirely by the four classes the model is trained on.</p>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">Against VAD</p>
+    <h2>How much of each component can VAD actually predict?</h2>
+    <div class="heat" id="vadcorr"></div>
+    <div class="legend">
+      <b><span class="sw" style="background:var(--pos)"></span>positive correlation</b>
+      <b><span class="sw" style="background:var(--neg)"></span>negative</b>
+      <b>saturates at &plusmn;0.7</b>
+    </div>
+
+    <p style="margin-top:1.2rem;max-width:64ch">Correlations with single dimensions answer the wrong question. The three dimensions could predict a component jointly, or nonlinearly, and neither shows up in a table of pairwise <em>r</em>. So the same thing measured properly: all three VAD dimensions together, fitted with <strong>speakers held out</strong>, linear and then gradient-boosted.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>component</th><th>best single r</th><th>joint linear R&sup2;</th><th>nonlinear R&sup2;</th></tr></thead>
+        <tbody>
+          <tr class="hl"><td class="name">PC1</td><td>0.380</td><td>0.193</td><td><strong>0.324</strong></td></tr>
+          <tr><td class="name">PC2</td><td>0.649</td><td>0.502</td><td>0.594</td></tr>
+          <tr><td class="name">PC3</td><td>0.436</td><td>0.218</td><td>0.422</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="caveat">
+      <p><strong>This page previously claimed PC2 "is" valence and PC1 is independent of VAD. Both were wrong.</strong></p>
+      <p>Nonlinearly, VAD recovers <strong>59.4%</strong> of PC2 &mdash; substantial, but 40% remains, so it is not valence in other coordinates. PC3 at 42.2% is weaker still. And PC1 is <em>not</em> independent of VAD: the three dimensions jointly recover <strong>32.4%</strong> of it, which low pairwise correlations concealed.</p>
+      <p>What survives is narrower and still worth something: <strong>PC1 is the least VAD-predictable of the three and simultaneously the largest</strong>, at 38.6% of the variance. The ordering by predictability is the opposite of the ordering by size.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Sanity check</p>
+    <h2>The four classes land where they should</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>majority class</th><th>PC1</th><th>PC2</th><th>PC3</th><th>utterances</th></tr></thead>
+        <tbody>
+          <tr><td class="name">Neutral</td><td>&minus;0.273</td><td>+0.098</td><td>+0.012</td><td>37,493</td></tr>
+          <tr><td class="name">Happy</td><td>+0.457</td><td>+0.258</td><td>+0.004</td><td>17,479</td></tr>
+          <tr><td class="name">Sad</td><td>&minus;0.011</td><td>&minus;0.289</td><td>&minus;0.445</td><td>6,672</td></tr>
+          <tr><td class="name">Angry</td><td>+0.134</td><td>&minus;0.492</td><td>+0.376</td><td>6,497</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:1.1rem">PC1 separates neutral from happy and says almost nothing about sad or angry. PC2 and PC3 separate sad from angry. No single component orders all four, which is the point: three numbers, not one scale.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Robustness</p>
+    <h2>Three checks that change the reading</h2>
+
+    <h3 style="margin-top:1.4rem">Rank three is largely forced, not discovered</h3>
+    <p style="margin-top:0.5rem;max-width:64ch">A four-class probability vector sums to one, so it occupies exactly three independent coordinates. The nine-label fit escapes that by construction &mdash; but only if the rare labels carry real mass.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>quantity</th><th>value</th></tr></thead>
+        <tbody>
+          <tr><td class="name">mean vote mass inside the four classes</td><td>0.752</td></tr>
+          <tr><td class="name">rows with ALL mass in the four classes</td><td>37.8%</td></tr>
+          <tr class="hl"><td class="name">variance in the four-class coordinates</td><td>79.9%</td></tr>
+          <tr><td class="name">variance in the five rare coordinates</td><td>20.1%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The four-class block holds 79.9% of the variance and spans exactly three dimensions by construction. "Rank three keeps 76.1%" is therefore close to restating that, not an independent discovery about emotion. The 20.1% outside it is the part that is genuinely about the wider label set.</p>
+
+    <h3 style="margin-top:1.8rem">A third of the residual is annotation noise</h3>
+    <p style="margin-top:0.5rem;max-width:64ch">The observed distribution is a five-person estimate, so part of its variance is sampling. The multinomial correction used elsewhere in this project applies here too.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>component of the variance</th><th>share</th></tr></thead>
+        <tbody>
+          <tr><td class="name">sampling noise</td><td>37.1%</td></tr>
+          <tr class="hl"><td class="name">explained by VAD</td><td>23.4% observed &rarr; <strong>37.1% of true</strong></td></tr>
+          <tr><td class="name">true signal VAD misses</td><td>39.6%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">So the earlier figure of "VAD explains only 25.4%" understated VAD. Against the variance that is actually signal, it explains <strong>37.1%</strong>. The residual is not all nuance: 37.1% of what VAD fails to explain is noise no predictor could reach.</p>
+
+    <h3 style="margin-top:1.8rem">The subspace is stable, the third direction less so</h3>
+    <p style="margin-top:0.5rem;max-width:64ch">Neutral and happy are the two most frequent classes, so PC1 loading on them could be frequency. Compared as subspaces by principal angle, not as individual directions.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>refit</th><th>principal angles from the committed basis</th></tr></thead>
+        <tbody>
+          <tr><td class="name">bootstrap resample, worst of 8</td><td>1.45&deg;</td></tr>
+          <tr class="hl"><td class="name">class-balanced, 6,000 per class</td><td>0.1&deg;, 1.0&deg;, <strong>12.8&deg;</strong></td></tr>
+          <tr><td class="name">two random 3-d subspaces of R&#8313;</td><td>80.5&deg;</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The subspace is not a frequency artefact: under balancing the first two directions move 0.1&deg; and 1.0&deg;, against 80.5&deg; for unrelated subspaces. But the third rotates <strong>12.8&deg;</strong>, so PC3 specifically does depend on the class mix and any claim resting on it should be hedged.</p>
+  </div>
+</section>
+
+<section class="tint">
+  <div class="wrap">
+    <p class="eyebrow">What it did</p>
+    <h2>Measured over three seeds</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th></th><th>IEMOCAP UAR</th><th>Acc</th><th>F1</th><th>SAMSEMO UAR</th><th>Acc</th><th>F1</th></tr></thead>
+        <tbody>
+          <tr><td class="name">rl_hard_s9</td><td>62.71</td><td>62.82</td><td>63.39</td><td>68.78</td><td>67.62</td><td>64.60</td></tr>
+          <tr class="hl"><td class="name">rl_lowrank_s9</td><td>63.33</td><td>63.60</td><td>64.10</td><td>68.82</td><td>68.97</td><td>65.81</td></tr>
+          <tr><td class="name">paired mean</td><td>+0.62</td><td>+0.78</td><td>+0.70</td><td>+0.04</td><td>+1.34</td><td>+1.22</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:1.1rem">IEMOCAP UAR is positive on all three seeds, paired sd 0.26, so mean over standard error is <strong>4.2</strong>. SAMSEMO UAR is zero and its sign flips, but accuracy and F1 are positive on all three seeds and larger than on IEMOCAP.</p>
+
+    <div class="caveat">
+      <p><strong>Softness is not ruled out as the explanation.</strong> Projecting to rank 3 raises mean target entropy from 0.486 to 0.708, and UAR in this setup has risen monotonically with target softness across every arm. Nothing here separates "the three-dimensional structure matters" from "flatter targets help". The control for that is <code>rl_raw</code> flattened by temperature to entropy 0.708 with no projection, and it has not been run.</p>
+    </div>
+    <p class="note">The projection also moves the argmax on 11.8% of rows, so one row in nine trains toward a different class than its panel's majority. A single full-data run showed +1.30 IEMOCAP UAR; three seeds at 90% data put it at +0.62, so that first figure was a favourable draw.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Basis from <span class="mono">analysis/continuum/mspp_continuum.npz</span>, built by <span class="mono">analysis/build_continuum_targets.py</span> on the official Train split alone, so no validation row influences a training target. Loadings, variance shares and VAD correlations are the committed basis the arm trained on. The rank-3 choice rests on an audio-predictability probe fitted separately on a 10,000-row class-balanced sample, whose variance shares differ from this fit &mdash; the directions agree, the percentages do not. VAD prediction is cross-validated with speakers held out across 2,112 speakers; the noise decomposition uses the unbiased multinomial estimate (1 &minus; ||p||&sup2;)/(n &minus; 1); subspaces are compared by principal angle.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var LABELS = ["Neutral", "Happy", "Sad", "Angry", "Contempt",
+                "Surprise", "Disgust", "Fear", "Other"];
+  var LOAD = [
+    [-0.77, 0.49, 0.14], [0.63, 0.65, 0.04], [-0.05, -0.26, -0.78],
+    [0.08, -0.48, 0.61], [0.03, -0.13, 0.04], [0.06, -0.08, -0.02],
+    [0.02, -0.08, 0.01], [0.02, -0.05, -0.03], [0.00, -0.06, -0.01]
+  ];
+  var VADC = [
+    [0.286, 0.380, 0.324],
+    [0.649, -0.143, -0.181],
+    [-0.021, 0.432, 0.436]
+  ];
+
+  function css(n) {
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue(n).trim();
+  }
+
+  function heat(host, rowLabels, colLabels, data, cap, cls) {
+    var el = document.getElementById(host);
+    var head = document.createElement("div");
+    head.className = "hrow " + cls;
+    var blank = document.createElement("div");
+    head.appendChild(blank);
+    colLabels.forEach(function (c) {
+      var d = document.createElement("div");
+      d.className = "hhd";
+      d.textContent = c;
+      head.appendChild(d);
+    });
+    el.appendChild(head);
+    data.forEach(function (row, i) {
+      var r = document.createElement("div");
+      r.className = "hrow " + cls;
+      var lab = document.createElement("div");
+      lab.className = "hlab";
+      lab.textContent = rowLabels[i];
+      r.appendChild(lab);
+      row.forEach(function (v) {
+        var cell = document.createElement("div");
+        cell.className = "hcell";
+        var a = Math.min(Math.abs(v) / cap, 1);
+        var hue = v >= 0 ? css("--pos") : css("--neg");
+        cell.style.background = "color-mix(in srgb, " + hue + " " +
+          (a * 100).toFixed(1) + "%, transparent)";
+        cell.style.color = a > 0.55 ? css("--on-strong") : css("--ink");
+        cell.textContent = (v > 0 ? "+" : v < 0 ? "−" : "") +
+          Math.abs(v).toFixed(2);
+        r.appendChild(cell);
+      });
+      el.appendChild(r);
+    });
+  }
+
+  heat("loadings", LABELS, ["PC1", "PC2", "PC3"], LOAD, 0.8, "labels9");
+  heat("vadcorr", ["PC1", "PC2", "PC3"],
+       ["valence", "arousal", "dominance"], VADC, 0.7, "vad3");
+}());
+</script>

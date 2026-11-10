@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Transport-loss arms, queued behind whatever is already training.
+# Entropy-matched comparison for rl_lowrank.
 #
-# These are the first arms that leave the target alone and change how
-# errors are priced. Both run at train_subsample_frac 0.9 so they are
-# directly comparable to rl_hard_s9, which is the baseline they must beat.
+# rl_lowrank gained +0.62 IEMOCAP UAR, but its targets are softer than
+# the raw distribution and UAR has tracked softness across every arm
+# here. These two put it in a three-point comparison at matched data:
+# rl_raw_s9 at entropy 0.486, rl_smooth_s9 at 0.708 with no structure,
+# and rl_lowrank_s9 at 0.708 with the projection. A tie against
+# rl_smooth_s9 means rl_lowrank is label smoothing with extra steps.
 #
-# One seed each to start. The pair is the point: if ot_weight 2.0 moves
-# nothing that 0.5 moved, the term is inert and no number of seeds will
-# help. Seeds come after the direction is established.
+# One seed each. Three seeds follow only if the direction is clear.
 set -u
 
 WT=/home/rml/Documents/pythontest/Emotion2Vec_Contrastive/.claude/worktrees/levers
@@ -43,11 +44,9 @@ run_one () {
 # Wait for the variance sweep to finish; one GPU, and this box needs a
 # physical visit if it goes down.
 while pgrep -f "runner.py --config" > /dev/null 2>&1; do sleep 120; done
-echo "[$(date +%H:%M:%S)] GPU free, starting transport arms"
+echo "[$(date +%H:%M:%S)] GPU free, starting comparison arms"
 
-run_one rl_ot 42
-run_one rl_ot_hi 42
+run_one rl_raw_s9 42
+run_one rl_smooth_s9 42
 
-echo "[$(date +%H:%M:%S)] transport arms finished"
-grep -h "Transport term active" "$LOGS"/rl_ot_seed42.log \
-    "$LOGS"/rl_ot_hi_seed42.log 2>/dev/null
+echo "[$(date +%H:%M:%S)] comparison arms finished"

@@ -5502,3 +5502,51 @@ experiments:
     soft_label_mode: "hard"
     train_subsample_frac: 0.9
     ot_weight: 2.0
+
+  # ---- Does rl_lowrank beat plain label smoothing? ----
+  #
+  # rl_lowrank gained +0.62 IEMOCAP UAR over three seeds, but its targets
+  # are SOFTER than the raw distribution (mean entropy 0.708 against
+  # 0.486) and UAR has risen monotonically with target softness across
+  # every arm here. A separate decomposition then showed the components it
+  # projects onto are 66.5 percent class identity and 29.8 percent
+  # annotation noise, leaving 3.7 percent for structure, so softness is
+  # the live explanation rather than a long shot.
+  #
+  # Two arms put rl_lowrank_s9 in a three-point comparison at matched data:
+  #   rl_raw_s9     entropy 0.486, annotator distribution, no projection
+  #   rl_smooth_s9  entropy 0.708, no structure at all
+  #   rl_lowrank_s9 entropy 0.708, with the projection
+  #
+  # rl_smooth_s9 mixes the raw distribution toward uniform by epsilon
+  # 0.0921, solved so mean entropy matches exactly. They are matched on
+  # entropy and NOT on displacement: smoothing leaves every argmax where
+  # it was while the projection moves 11.8 percent of them, and its mean
+  # total-variation shift is about twice as large. One parameter cannot
+  # match both, so the contrast isolates the projection's shape and
+  # relabelling against simply being this soft.
+  #
+  # A tie means rl_lowrank is label smoothing with extra steps.
+  - <<: *template
+    name: "rl_raw_s9"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "raw"
+    train_subsample_frac: 0.9
+
+  - <<: *template
+    name: "rl_smooth_s9"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "smooth"
+    train_subsample_frac: 0.9

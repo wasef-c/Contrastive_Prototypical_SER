@@ -292,7 +292,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 confidence_tracker=None, intensity_ctx=None,
                 ambiguity_weights=None, evidence_pos_weight=None,
                 hierarchical_emotion_weights=None, salience_stats=None,
-                genlabel_density=None):
+                genlabel_density=None, ot_cost=None):
     """
     Train for one epoch
 
@@ -674,7 +674,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                     # schemes is refused at setup rather than silently
                     # taking a different reduction.
                     loss_primary = per_sample_loss.mean()
-                elif soft_mode in ('lowrank', 'kernel'):
+                elif soft_mode in ('lowrank', 'kernel', 'smooth'):
                     # Continuous targets drawn from the label space itself
                     # rather than from VAD.
                     #
@@ -695,6 +695,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                         labels, num_classes=config.num_classes).float()
                     if soft_mode == 'kernel':
                         soft_targets = batch['cont_kernel'].to(device).float()
+                    elif soft_mode == 'smooth':
+                        # Entropy-matched control: the raw annotator
+                        # distribution mixed toward uniform by a single
+                        # epsilon, solved so its mean entropy equals the
+                        # low-rank target's. Plain label smoothing, so a
+                        # tie against rl_lowrank says that arm's gain is
+                        # softness rather than structure.
+                        sm = batch['cont_smooth'].to(device).float()
+                        keep = (batch['cont_mask'].to(device).float()
+                                > 0).unsqueeze(1)
+                        soft_targets = torch.where(keep, sm, one_hot)
                     else:
                         low = batch['cont_lowrank'].to(device).float()
                         keep = (batch['cont_mask'].to(device).float()
@@ -1000,8 +1011,8 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 # recall is unaffected by WHERE a row's errors land. So
                 # this should move F1 and accuracy more than UAR, and a
                 # flat UAR here is the expected result rather than a null.
-                if ot_weight > 0.0 and _ot_cost is not None:
-                    cost_rows = _ot_cost.to(logits.device)[labels]
+                if ot_weight > 0.0 and ot_cost is not None:
+                    cost_rows = ot_cost.to(logits.device)[labels]
                     loss_ot = (F.softmax(logits, dim=1)
                                * cost_rows).sum(dim=1).mean()
                     loss_primary = loss_primary + ot_weight * loss_ot
@@ -4902,6 +4913,7 @@ def train(config, datasets=None):
                 hierarchical_emotion_weights=hierarchical_emotion_weights,
                 salience_stats=salience_stats,
                 genlabel_density=genlabel_density,
+                ot_cost=_ot_cost,
             )
             global_step = train_metrics['global_step']
 

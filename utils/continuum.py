@@ -52,6 +52,7 @@ class ContinuumTargets:
             keys = np.asarray(z["keys"]).astype(str)
             self.lowrank = np.asarray(z["lowrank_target"], dtype=np.float32)
             self.raw = np.asarray(z["raw_target"], dtype=np.float32)
+            self.smooth = np.asarray(z["smooth_target"], dtype=np.float32)
             self.pc_coords = np.asarray(z["pc_coords"], dtype=np.float32)
             self.kernel = np.asarray(z["kernel"], dtype=np.float32)
             self.ot_cost = np.asarray(z["ot_cost"], dtype=np.float32)
@@ -82,6 +83,22 @@ class ContinuumTargets:
             return (np.zeros(NUM_CLASSES, dtype=np.float32),
                     np.zeros(3, dtype=np.float32), 0.0)
         return self.lowrank[row], self.pc_coords[row], 1.0
+
+    def smooth_row(self, key: Optional[str]) -> Tuple[np.ndarray, float]:
+        """The entropy-matched smoothing target for one utterance.
+
+        Args:
+            key: extension-stripped audio filename, or None.
+
+        Returns:
+            Tuple of the [C] target and a coverage mask.
+        """
+        if key is None:
+            return np.zeros(NUM_CLASSES, dtype=np.float32), 0.0
+        row = self.index.get(key)
+        if row is None:
+            return np.zeros(NUM_CLASSES, dtype=np.float32), 0.0
+        return self.smooth[row], 1.0
 
     def kernel_target(self, label: int) -> np.ndarray:
         """The smoothing target for a hard label.

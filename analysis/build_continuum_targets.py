@@ -142,6 +142,47 @@ def main() -> None:
     print("  rows whose argmax changes: %.2f%%"
           % (100 * (lowrank.argmax(1) != raw4.argmax(1)).mean()))
 
+    # ---- entropy-matched smoothing control --------------------------
+    # The low-rank target is SOFTER than the raw distribution, not just
+    # differently shaped: mean entropy rises 0.486 to 0.708. UAR has risen
+    # monotonically with target softness across every arm in this project,
+    # so a win for the low-rank arm is explainable by entropy alone unless
+    # something holds entropy fixed.
+    #
+    # This is that control: the raw distribution mixed toward uniform by a
+    # single epsilon, solved so its mean entropy equals the low-rank
+    # target's exactly. Plain label smoothing, no structure of any kind.
+    #
+    # The two are matched on entropy and NOT on displacement: smoothing
+    # leaves every argmax where it was, while the projection moves 11.8
+    # percent of them, and its mean total-variation shift is about twice
+    # as large. Matching both with one parameter is not possible, so the
+    # comparison isolates "the projection's shape and relabelling" against
+    # "being this soft".
+    def mean_entropy(q: np.ndarray) -> float:
+        """Mean Shannon entropy of a set of distributions."""
+        return float(-(q * np.log(np.clip(q, 1e-12, None))).sum(axis=1).mean())
+
+    want = mean_entropy(lowrank[is_train])
+    lo, hi = 0.0, 1.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if mean_entropy((1.0 - mid) * raw4[is_train]
+                        + mid / NUM_CLASSES) < want:
+            lo = mid
+        else:
+            hi = mid
+    eps = 0.5 * (lo + hi)
+    smooth = (1.0 - eps) * raw4 + eps / NUM_CLASSES
+    print("\nentropy-matched smoothing control")
+    print("  epsilon %.4f gives entropy %.4f against low-rank %.4f"
+          % (eps, mean_entropy(smooth[is_train]), want))
+    print("  argmax moved: smoothing %.2f%%, projection %.2f%%"
+          % (100 * (smooth[is_train].argmax(1)
+                    != raw4[is_train].argmax(1)).mean(),
+             100 * (lowrank[is_train].argmax(1)
+                    != raw4[is_train].argmax(1)).mean()))
+
     # ---- substitution kernel ----------------------------------------
     joint = joint_label_matrix(probs[is_train], n_ann[is_train])
     joint4 = joint[:NUM_CLASSES, :NUM_CLASSES]
@@ -203,6 +244,8 @@ def main() -> None:
         pc_var_ratio=ratio[:RANK].astype(np.float32),
         lowrank_target=lowrank.astype(np.float32),
         raw_target=raw4.astype(np.float32),
+        smooth_target=smooth.astype(np.float32),
+        smooth_epsilon=np.float32(eps),
         kernel=kernel.astype(np.float32),
         labels=np.array(MSPP_LABELS[:NUM_CLASSES]),
     )
