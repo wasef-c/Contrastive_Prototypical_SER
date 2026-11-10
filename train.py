@@ -39,6 +39,8 @@ from models.prototypicality_predictor import PrototypicalityPredictor
 from utils.length_bucket import (LengthBucketedBatchSampler,
                                  load_or_compute_durations)
 from utils.margin_loss import LDAMLoss
+from utils.triplets import (TripletBatchSampler, build_key_index,
+                            load_triplet_indices)
 from utils.metrics import threshold_free_metrics
 from utils.metrics import calculate_classification_metrics, calculate_vad_metrics
 from utils.prototypicality import (
@@ -292,7 +294,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
                 confidence_tracker=None, intensity_ctx=None,
                 ambiguity_weights=None, evidence_pos_weight=None,
                 hierarchical_emotion_weights=None, salience_stats=None,
-                genlabel_density=None, ot_cost=None):
+                genlabel_density=None, ot_cost=None, triplet_iter=None):
     """
     Train for one epoch
 
@@ -331,6 +333,12 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
     total_loss = 0
     total_primary_loss = 0
     total_contrastive_loss = 0
+    # Triplet term diagnostics. The active fraction is the share of
+    # triplets still violating the margin: if it collapses to zero the
+    # term has stopped contributing and a null result means nothing.
+    total_triplet_loss = 0.0
+    total_triplet_active = 0.0
+    n_triplet_batches = 0
     total_adversarial_loss = 0
     total_modality_adversarial_loss = 0
     total_proto_pred_loss = 0
@@ -394,6 +402,58 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         _ps_ref = [None]
         is_last_batch = (batch_idx == num_batches - 1)
         should_step = ((batch_idx + 1) % accum_steps == 0) or is_last_batch
+
+        # VAD-matched triplet term.
+        #
+        # Run BEFORE the main forward, with its own backward, so the two
+        # graphs never coexist. Summing it into the main loss instead
+        # would hold activations for 16 + 18 clips at once on a 24 GB
+        # card with 89.8M trainable parameters; this way the peak is the
+        # larger of the two, not the sum. Gradients accumulate into the
+        # same buffers either way, so the optimizer step is unchanged.
+        #
+        # The duty cycle keeps the cost down: one batch of 6 triplets
+        # every triplet_every main batches. At 3,318 batches per epoch
+        # and every=3 that is about three traversals of the 2,239
+        # triplets per epoch for roughly 37 percent extra forward cost.
+        if (triplet_iter is not None
+                and batch_idx % int(getattr(config, 'triplet_every', 3)) == 0):
+            try:
+                t_batch = next(triplet_iter)
+            except StopIteration:
+                t_batch = None
+            if t_batch is not None:
+                t_inputs = _prepare_model_inputs(t_batch, config, model,
+                                                 device)
+                with autocast('cuda', enabled=use_amp):
+                    t_out = model(**t_inputs, return_embeddings=True)
+                    # Default to the RAW fused embedding, not the
+                    # contrastive projection. The projection head is the
+                    # conventional choice, but a null there is
+                    # uninterpretable: the margin can be satisfied in
+                    # projection space while the classifier, which reads
+                    # the raw embedding, never changes a prediction. The
+                    # endpoint here is a prediction change, so the term
+                    # is applied where the classifier will feel it.
+                    t_space = str(getattr(config, 'triplet_space', 'raw'))
+                    t_vec = t_out[2] if t_space == 'raw' else t_out[1]
+                    t_emb = F.normalize(t_vec, p=2, dim=1)
+                    t_emb = t_emb.view(-1, 3, t_emb.size(-1))
+                    d_ap = (t_emb[:, 0] - t_emb[:, 1]).pow(2).sum(dim=1)
+                    d_an = (t_emb[:, 0] - t_emb[:, 2]).pow(2).sum(dim=1)
+                    margin = float(getattr(config, 'triplet_margin', 0.2))
+                    loss_triplet = F.relu(d_ap - d_an + margin).mean()
+                    t_scaled = (float(getattr(config, 'triplet_weight', 0.5))
+                                * loss_triplet / accum_steps)
+                if use_amp:
+                    scaler.scale(t_scaled).backward()
+                else:
+                    t_scaled.backward()
+                total_triplet_loss += float(loss_triplet.detach())
+                n_triplet_batches += 1
+                t_active = float((d_ap - d_an + margin > 0).float().mean())
+                total_triplet_active += t_active
+
         # Move to device
         labels = batch['label'].to(device)
 
@@ -2606,9 +2666,18 @@ def train_epoch(model, dataloader, criterion, optimizer, device, config,
         mean_lam = (muted_lam_sum / muted_lam_n) if muted_lam_n else float('nan')
         print(f"   muted mixup: {muted_synth_count} synthetic samples this epoch, "
               f"mean lambda={mean_lam:.3f}")
+    if n_triplet_batches:
+        print("   triplet term: %d batches, mean loss %.4f, margin-active "
+              "%.1f%%" % (n_triplet_batches,
+                          total_triplet_loss / n_triplet_batches,
+                          100 * total_triplet_active / n_triplet_batches))
     return {
         'loss': avg_loss,
         'primary_loss': avg_primary_loss,
+        'triplet_loss': (total_triplet_loss / n_triplet_batches
+                         if n_triplet_batches else 0.0),
+        'triplet_active': (total_triplet_active / n_triplet_batches
+                           if n_triplet_batches else 0.0),
         'contrastive_loss': avg_contrastive_loss,
         'adversarial_loss': avg_adversarial_loss,
         'modality_adversarial_loss': avg_modality_adversarial_loss,
@@ -3962,6 +4031,46 @@ def train(config, datasets=None):
             persistent_workers=persistent,
             prefetch_factor=prefetch,
         )
+    # VAD-matched triplet loader. Served separately from the main loader
+    # so the classification stream is byte-identical between the matched
+    # and shuffled arms; see utils/triplets for why packing them into the
+    # main batch would confound the contrast.
+    triplet_loader = None
+    _trip_mode = str(getattr(config, 'triplet_mode', '') or '')
+    if _trip_mode and float(getattr(config, 'triplet_weight', 0.0)) > 0.0:
+        key_to_pos = build_key_index(train_dataset, train_indices)
+        _triples, _n_stored = load_triplet_indices(key_to_pos, _trip_mode)
+        if len(_triples) == 0:
+            raise ValueError(
+                "triplet_mode=%r is set but none of the %d stored triplets "
+                "resolved against the training pool; check that the "
+                "assignments were built for this corpus and split"
+                % (_trip_mode, _n_stored))
+        _trip_batch = int(getattr(config, 'triplet_batch', 6))
+        _sampler = TripletBatchSampler(
+            _triples, batch_triplets=_trip_batch,
+            seed=int(getattr(config, 'seed', 42)))
+        triplet_loader = DataLoader(
+            train_subset,
+            batch_sampler=_sampler,
+            collate_fn=vad_collate_fn,
+            num_workers=0,
+            pin_memory=pin_memory,
+        )
+        print("  Triplet term: mode=%s, %d of %d stored triplets resolved "
+              "(%.1f%%), %d per batch every %d steps, weight %.2f, margin "
+              "%.2f" % (_trip_mode, len(_triples), _n_stored,
+                        100.0 * len(_triples) / max(1, _n_stored),
+                        _trip_batch,
+                        int(getattr(config, 'triplet_every', 3)),
+                        float(getattr(config, 'triplet_weight', 0.5)),
+                        float(getattr(config, 'triplet_margin', 0.2))))
+
+    # One iterator for the whole run. The sampler cycles indefinitely and
+    # reshuffles each traversal, so it must not be re-created per epoch or
+    # every epoch would see the same order.
+    _triplet_iter = iter(triplet_loader) if triplet_loader is not None else None
+
     val_loader = DataLoader(
         val_subset,
         batch_size=eval_batch_size,
@@ -4914,6 +5023,7 @@ def train(config, datasets=None):
                 salience_stats=salience_stats,
                 genlabel_density=genlabel_density,
                 ot_cost=_ot_cost,
+                triplet_iter=_triplet_iter,
             )
             global_step = train_metrics['global_step']
 

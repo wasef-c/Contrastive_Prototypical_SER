@@ -5550,3 +5550,76 @@ experiments:
     val_split_official: true
     soft_label_mode: "smooth"
     train_subsample_frac: 0.9
+
+  # ---- VAD-matched triplets: make the model find the non-VAD cue ----
+  #
+  # Every mechanism tried so far edits the target of a 4-way softmax. The
+  # failure analysis says the target was never the binding constraint: a
+  # fifth of each evaluation corpus is wrong in all 37 runs, and 47.4
+  # percent of that core sits closer to another class's VAD centroid than
+  # its own. So these arms leave the target alone (hard labels) and change
+  # what the representation is asked to separate.
+  #
+  # The term is a margin triplet on the raw fused embedding. The negative
+  # is a clip of the confusable class whose VAD is within 0.05 of the
+  # anchor's, from a different speaker, so the pair cannot be told apart
+  # by VAD and the model has to find something else. VAD is used only to
+  # select the negative offline; it is never a model input.
+  #
+  # Bidirectional, which matters. Happy anchors against neutral negatives
+  # alone is satisfiable by sliding the happy/neutral boundary toward
+  # happy: quiet-happy recall rises, neutral-called-happy rises with it,
+  # and nothing has been learned. Anchoring both directions makes moving
+  # the boundary cost as much as it gains. 1,048 happy anchors (cap 8 per
+  # speaker, Gini 0.44) against 1,191 neutral (cap 2, Gini 0.15).
+  #
+  # Angry is absent by measurement, not oversight: only 184 angry clips
+  # are VAD-atypical at all and happy-to-angry pairs cover 13.6 percent.
+  # Sad has coverage but 214 to 325 anchors after capping, too few to
+  # move a 53k-row training set.
+  #
+  # rl_trip_rand is the control and the whole point. It carries the same
+  # term, the same duty cycle and the SAME multiset of negative clips,
+  # reassigned by a shuffle within direction. 100 percent of matched
+  # negatives sit inside the radius against about 4 percent of shuffled
+  # ones, so the arms differ in the matching and in nothing else. A gain
+  # that appears in both is the triplet term, not the VAD matching, and
+  # is not the claim.
+  #
+  # Watch the margin-active fraction printed each epoch. If it collapses
+  # to zero the term stopped contributing and a null means nothing.
+  - <<: *template
+    name: "rl_trip_vad"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    train_subsample_frac: 0.9
+    triplet_mode: "matched"
+    triplet_space: "raw"
+    triplet_weight: 0.5
+    triplet_margin: 0.3
+    triplet_batch: 6
+    triplet_every: 3
+
+  - <<: *template
+    name: "rl_trip_rand"
+    unfreeze_audio_layers: 4
+    unfreeze_bert_layers: 4
+    bert_learning_rate: 5e-6
+    seeds: [42, 189, 7]
+    test_datasets: ["IEMOFULL", "SAMSEMO"]
+    class_weight_mode: "sqrt_inverse_freq"
+    val_split_official: true
+    soft_label_mode: "hard"
+    train_subsample_frac: 0.9
+    triplet_mode: "random"
+    triplet_space: "raw"
+    triplet_weight: 0.5
+    triplet_margin: 0.3
+    triplet_batch: 6
+    triplet_every: 3

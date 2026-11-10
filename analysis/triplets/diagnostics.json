@@ -1,0 +1,36 @@
+{
+  "directions": {
+    "happy_to_neutral": {
+      "anchor_pool": 2176,
+      "usable_anchors": 2142,
+      "kept_anchors": 1048,
+      "anchor_speakers": 402,
+      "cap": 8,
+      "anchor_gini": 0.441532794045042,
+      "matched_median_dist": 0.0430760541973718,
+      "random_median_dist": 0.21343743858752692,
+      "matched_within_radius": 1.0,
+      "random_within_radius": 0.042938931297709926
+    },
+    "neutral_to_happy": {
+      "anchor_pool": 2827,
+      "usable_anchors": 2789,
+      "kept_anchors": 1191,
+      "anchor_speakers": 748,
+      "cap": 2,
+      "anchor_gini": 0.1516666891166817,
+      "matched_median_dist": 0.047140407122464756,
+      "random_median_dist": 0.14174836302618704,
+      "matched_within_radius": 1.0,
+      "random_within_radius": 0.04114189756507137
+    }
+  },
+  "args": {
+    "radius": 0.05,
+    "min_agree": 0.8,
+    "seed": 0
+  },
+  "triples_matched": 2239,
+  "triples_random": 2235,
+  "dropped": 4
+}

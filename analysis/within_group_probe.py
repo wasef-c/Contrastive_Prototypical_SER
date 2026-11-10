@@ -88,7 +88,7 @@ def coincident_rows(meta) -> Dict[str, Tuple[int, Tuple[float, ...]]]:
 def main() -> None:
     """Run both tests inside the coincident-VAD groups."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", default="uf4_softmix", help="checkpoint arm")
+    parser.add_argument("--arm", default="rl_hard", help="checkpoint arm")
     parser.add_argument("--seed", type=int, default=42, help="run seed")
     parser.add_argument("--min-group", type=int, default=12,
                         help="smallest group worth analysing")
